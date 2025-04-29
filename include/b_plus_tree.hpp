@@ -1,6 +1,6 @@
 #pragma once
 
-#include "file_manager.hpp"
+#include "persistent_memory.hpp"
 
 template <typename idx_t_, typename val_t>
 class BPlusTree;
