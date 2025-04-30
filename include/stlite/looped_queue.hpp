@@ -17,15 +17,17 @@ namespace norb {
     [[nodiscard]] int size() const { return size_; }
     [[nodiscard]] bool empty() const { return size_ == 0; }
     void insert(const val_t_ &val) {
-      q_[cur_++] = val;
       cur_ %= capacity_;
+      q_[cur_++] = val;
       if (size_ < capacity_)
         ++size_;
+      else
+        cur_ %= capacity_;
     }
     const val_t_ &back() const {
-      if (size_ < capacity_)
+      if (size_ < capacity_ || cur_ >= capacity_) // the latter case only happens
         return q_[0];
-      return q_[(size_ - 1 + capacity_) % capacity_];
+      return q_[cur_ % capacity_];
     }
   };
 } // namespace norb
