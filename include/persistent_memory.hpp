@@ -39,7 +39,7 @@ namespace norb {
     // alias and constants
     using time_stamp_t = unsigned long;
     static constexpr auto time_stamp_inf_ =
-        std::numeric_limits<time_stamp_t>::infinity();
+        std::numeric_limits<time_stamp_t>::max();
 
     // The number of pages the memory can store.
     static constexpr slot_id_t SLOT_COUNT = MEMORY_SIZE / PAGE_SIZE;
@@ -141,7 +141,7 @@ namespace norb {
       void allocate_page_and_update_slot() {
         auto &pmem = get_instance();
         slot_id = pmem.find_page_id_in_buffer(page_id);
-        if (slot_id == static_cast<page_id_t>(-1)) {
+        if (slot_id == static_cast<slot_id_t>(-1)) {
           if (pmem.current_pages_in_buffer < SLOT_COUNT) {
             // create a new page
             slot_id = pmem.current_pages_in_buffer++;
@@ -196,7 +196,7 @@ namespace norb {
       void allocate_page_and_update_slot() {
         auto &pmem = get_instance();
         slot_id = pmem.find_page_id_in_buffer(page_id);
-        if (slot_id == static_cast<page_id_t>(-1)) {
+        if (slot_id == static_cast<slot_id_t>(-1)) {
           if (pmem.current_pages_in_buffer < SLOT_COUNT) {
             // create a new page
             slot_id = pmem.current_pages_in_buffer++;
@@ -235,7 +235,7 @@ namespace norb {
         if (get_instance().buffer_page_id[slot_id] != page_id) {
           allocate_page_and_update_slot();
         }
-        return reinterpret_cast<T *>(get_instance().buffer[slot_id]);
+        return reinterpret_cast<const T *>(get_instance().buffer[slot_id]);
       }
     };
 
@@ -436,6 +436,21 @@ namespace norb {
      */
     template <typename T> static void remove(const Handle<T> &handle) {
       auto &persistent_memory = get_instance();
+      // call the destructor of T
+      handle.ref().as_raw_ptr()->~T();
+      persistent_memory.garbage_collector.dump(handle.page_id);
+    }
+
+    /**
+     * @brief Remove a variable from a page, and deallocate the page if it is
+     * empty.
+     * @tparam T The type of variable to delete.
+     * @param handle A mutable handle to which the variable is to be removed.
+     */
+    template <typename T> static void remove(const MutableHandle &handle) {
+      auto &persistent_memory = get_instance();
+      // call the destructor of T
+      handle.ref<T>().as_raw_ptr()->~T();
       persistent_memory.garbage_collector.dump(handle.page_id);
     }
 

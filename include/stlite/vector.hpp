@@ -22,8 +22,8 @@ namespace norb {
     static T *raw_new(const size_t &count) {
       const auto allocated =
           static_cast<T *>(operator new[](sizeof(T) * count));
-      // TODO is necessary? Slows down **dramatically**.
-      memset(allocated, 0, sizeof(T) * count);
+      // Done is necessary for the mement. Slows down **dramatically**.
+      // Done needed for operator = (will call destructor first)
       return allocated;
     }
 
