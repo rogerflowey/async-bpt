@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cassert>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 
@@ -59,6 +60,47 @@ namespace norb {
       f.open(file_name, mode);
     }
   } // namespace filesystem
+
+  namespace hash {
+    // a collection of commonly used hashing algorithms
+    using hashed_t_ = uint32_t;
+
+    inline hashed_t_ basic_hash(const std::string &str) {
+      constexpr hashed_t_ MOD = 4294967029;
+      hashed_t_ hash = 0;
+      for (auto i : str) {
+        hash += static_cast<hashed_t_>(i);
+        hash = (hash << 16) + hash;
+        hash %= MOD;
+      }
+      return hash;
+    }
+
+    inline hashed_t_ fnv1a_hash(const std::string &str) {
+      // FNV constants for 32-bit hash
+      constexpr hashed_t_ fnv_prime = 16777619U;
+      constexpr hashed_t_ fnv_offset_basis = 2166136261U;
+
+      hashed_t_ hash = fnv_offset_basis;
+
+      // Iterate over bytes as unsigned char
+      for (unsigned char c : str) {
+        hash ^= static_cast<hashed_t_>(c); // XOR with byte
+        hash *= fnv_prime;                 // Multiply by prime
+      }
+      return hash;
+    }
+
+    inline hashed_t_ djb2_hash(const std::string &str) {
+      hashed_t_ hash = 5381; // Initial magic constant
+      // Iterate over bytes as unsigned char
+      for (unsigned char c : str) {
+        // hash = hash * 33 + c
+        hash = ((hash << 5) + hash) + static_cast<hashed_t_>(c);
+      }
+      return hash;
+    }
+  } // namespace hash
 
   // Returns whether the three given variables are in ascending order,
   // non-strictly.
