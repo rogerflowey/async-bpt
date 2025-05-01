@@ -4,7 +4,6 @@
 using norb::FiledConfig;
 
 int main() {
-  std::cout << "set file path" << '\n';
   FiledConfig::set_file_path("./test.master.config");
 
   auto int_config = FiledConfig::track(5);
