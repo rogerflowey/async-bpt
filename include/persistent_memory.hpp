@@ -1,9 +1,9 @@
 #pragma once
 
-#include "utils.hpp"
 #include "shared.hpp"
 #include "stlite/looped_queue.hpp"
 #include "stlite/vector.hpp"
+#include "utils.hpp"
 #include <cmath>
 #include <filesystem>
 #include <limits>
@@ -96,7 +96,8 @@ namespace norb {
     }
 
     // Register a page to the buffer pool
-    void load_page_from_disk(const page_id_t &page_id, const slot_id_t &slot_id) {
+    void load_page_from_disk(const page_id_t &page_id,
+                             const slot_id_t &slot_id) {
       history[slot_id].insert(time_stamp++);
       buffer_page_id[slot_id] = page_id;
       // copy the disk info to the memory
@@ -280,7 +281,8 @@ namespace norb {
     template <typename T> struct Handle {
       page_id_t page_id;
 
-      explicit Handle(const page_id_t &page_id = static_cast<page_id_t>(-1)) : page_id(page_id) {}
+      explicit Handle(const page_id_t &page_id = static_cast<page_id_t>(-1))
+          : page_id(page_id) {}
 
       /**
        * @brief Retrieve a read-write reference to the chunk of persistent
@@ -303,6 +305,8 @@ namespace norb {
       [[nodiscard]] bool is_nullptr() const {
         return page_id == static_cast<page_id_t>(-1);
       }
+
+      void set_nullptr() { page_id = static_cast<page_id_t>(-1); }
     };
 
     /**
@@ -315,7 +319,9 @@ namespace norb {
     struct MutableHandle {
       page_id_t page_id = 0;
 
-      explicit MutableHandle(const page_id_t &page_id) : page_id(page_id) {}
+      explicit MutableHandle(
+          const page_id_t &page_id = static_cast<page_id_t>(-1))
+          : page_id(page_id) {}
 
       /**
        * @brief Retrieve a read-write reference to the chunk of persistent
@@ -339,6 +345,8 @@ namespace norb {
       [[nodiscard]] bool is_nullptr() const {
         return page_id == static_cast<page_id_t>(-1);
       }
+
+      void set_nullptr() { page_id = static_cast<page_id_t>(-1); }
     };
 
     /**
@@ -435,6 +443,8 @@ namespace norb {
      * @param handle A handle to which the variable is to be removed.
      */
     template <typename T> static void remove(const Handle<T> &handle) {
+      if (handle.is_nullptr())
+        return;
       auto &persistent_memory = get_instance();
       // call the destructor of T
       handle.ref().as_raw_ptr()->~T();
@@ -448,6 +458,8 @@ namespace norb {
      * @param handle A mutable handle to which the variable is to be removed.
      */
     template <typename T> static void remove(const MutableHandle &handle) {
+      if (handle.is_nullptr())
+        return;
       auto &persistent_memory = get_instance();
       // call the destructor of T
       handle.ref<T>().as_raw_ptr()->~T();
