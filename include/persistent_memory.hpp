@@ -55,6 +55,7 @@ namespace norb {
     LoopedQueue<time_stamp_t, LRU_K_INDEX> history[SLOT_COUNT];
     page_id_t buffer_page_id[SLOT_COUNT]{};
     bool is_dirty[SLOT_COUNT]{};
+    short lock_count[SLOT_COUNT]{};
     char buffer[SLOT_COUNT][PAGE_SIZE];
 
     std::fstream fconfig;
@@ -76,10 +77,14 @@ namespace norb {
     slot_id_t get_lru_k() const {
       std::pair<time_stamp_t, slot_id_t> evict_lru_k = {time_stamp_inf_, -1};
       for (slot_id_t id = 0; id < current_pages_in_buffer; id++) {
+        if (lock_count[id])
+          continue;
         if (history[id].back() < evict_lru_k.first) {
           evict_lru_k = {history[id].back(), id};
         }
       }
+      if (evict_lru_k.second == static_cast<slot_id_t>(-1))
+        throw std::overflow_error("Memory Buffer overflowed!");
       return evict_lru_k.second;
     }
 
@@ -130,6 +135,9 @@ namespace norb {
       [[nodiscard]] bool available() const { return not garbage.empty(); }
     } garbage_collector{};
 
+    //! [Changelog] Change the two Reference types to implement lifespan-lock
+    //! modeling
+
     /**
      * @struct HandledReference
      * @brief A reference to the data held by Handle.
@@ -154,6 +162,7 @@ namespace norb {
           pmem.load_page_from_disk(page_id, slot_id);
         }
         pmem.is_dirty[slot_id] = true;
+        ++pmem.lock_count[slot_id];
       }
 
     public:
@@ -161,26 +170,30 @@ namespace norb {
         allocate_page_and_update_slot();
       }
 
-      ~HandledReference() = default;
+      ~HandledReference() { --get_instance().lock_count[slot_id]; }
+
+      explicit HandledReference(const HandledReference<page_id_t> &) = delete;
+      HandledReference<page_id_t> &operator=(const HandledReference<page_id_t> &) = delete;
+      HandledReference(HandledReference &&) = delete;
 
       T *operator->() {
-        if (get_instance().buffer_page_id[slot_id] != page_id) {
-          allocate_page_and_update_slot();
-        }
+        // if (get_instance().buffer_page_id[slot_id] != page_id) {
+        //   allocate_page_and_update_slot();
+        // }
         return reinterpret_cast<T *>(get_instance().buffer[slot_id]);
       }
 
       T &operator*() {
-        if (get_instance().buffer_page_id[slot_id] != page_id) {
-          allocate_page_and_update_slot();
-        }
+        // if (get_instance().buffer_page_id[slot_id] != page_id) {
+        //   allocate_page_and_update_slot();
+        // }
         return reinterpret_cast<T &>(get_instance().buffer[slot_id]);
       }
 
       T *as_raw_ptr() {
-        if (get_instance().buffer_page_id[slot_id] != page_id) {
-          allocate_page_and_update_slot();
-        }
+        // if (get_instance().buffer_page_id[slot_id] != page_id) {
+        //   allocate_page_and_update_slot();
+        // }
         return reinterpret_cast<T *>(get_instance().buffer[slot_id]);
       }
     };
@@ -208,6 +221,7 @@ namespace norb {
           }
           pmem.load_page_from_disk(page_id, slot_id);
         }
+        ++pmem.lock_count[slot_id];
       }
 
     public:
@@ -216,26 +230,30 @@ namespace norb {
         allocate_page_and_update_slot();
       }
 
-      ~ConstHandledReference() = default;
+      ~ConstHandledReference() { --get_instance().lock_count[slot_id]; }
+
+      explicit ConstHandledReference(const ConstHandledReference<page_id_t> &) = delete;
+      ConstHandledReference<page_id_t> &operator = (const ConstHandledReference<page_id_t> &) = delete;
+      ConstHandledReference(ConstHandledReference &&) = delete;
 
       const T *operator->() {
-        if (get_instance().buffer_page_id[slot_id] != page_id) {
-          allocate_page_and_update_slot();
-        }
+        // if (get_instance().buffer_page_id[slot_id] != page_id) {
+        //   allocate_page_and_update_slot();
+        // }
         return reinterpret_cast<T *>(get_instance().buffer[slot_id]);
       }
 
       const T &operator*() {
-        if (get_instance().buffer_page_id[slot_id] != page_id) {
-          allocate_page_and_update_slot();
-        }
+        // if (get_instance().buffer_page_id[slot_id] != page_id) {
+        //   allocate_page_and_update_slot();
+        // }
         return reinterpret_cast<const T &>(get_instance().buffer[slot_id]);
       }
 
       const T *as_raw_ptr() {
-        if (get_instance().buffer_page_id[slot_id] != page_id) {
-          allocate_page_and_update_slot();
-        }
+        // if (get_instance().buffer_page_id[slot_id] != page_id) {
+        //   allocate_page_and_update_slot();
+        // }
         return reinterpret_cast<const T *>(get_instance().buffer[slot_id]);
       }
     };
@@ -260,6 +278,8 @@ namespace norb {
     ~PersistentMemory() {
       // update all dirty pages
       for (slot_id_t slot = 0; slot < current_pages_in_buffer; slot++) {
+        // if locking fails, assert here to determine why
+        // assert(lock_count[slot] == 0);
         evict_page(slot);
       }
       // write the config to the fconfig

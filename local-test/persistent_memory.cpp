@@ -6,10 +6,9 @@
 using norb::PersistentMemory;
 
 void test_basic() {
-  // auto a = PersistentMemory::create<int>();
-  // *a.ref() = 1;
-  std::cout << '+' << '\n';
-  auto a = PersistentMemory::fetch_handle<int>(0);
+  auto a = PersistentMemory::create<int>();
+  *a.ref() = 1;
+  // auto a = PersistentMemory::fetch_handle<int>(0);
   std::cout << PersistentMemory::get_page_count() << std::endl;
   assert(*a.const_ref() == 1);
 }
@@ -178,6 +177,7 @@ void test_lru_k_and_remove() {
 }
 
 int main() {
+  test_basic();
+  test_reference();
   test_lru_k_and_remove();
-  // test_reference();
 }
