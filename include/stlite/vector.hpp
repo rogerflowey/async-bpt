@@ -6,6 +6,7 @@
 #include <climits>
 #include <cstddef>
 #include <stdexcept>
+#include <cstring>
 
 namespace norb {
   template <typename T> class vector {
