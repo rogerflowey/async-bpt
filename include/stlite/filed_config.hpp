@@ -58,13 +58,13 @@ namespace norb {
     };
 
   public:
-    static void set_file_path(const std::string &path) {
-      file_path = path;
-    }
+    template <typename val_t_> using tracker_t_ = RAII_Tracker<val_t_>;
 
-    template <typename val_t_>
-    static RAII_Tracker<val_t_> track(const val_t_ &default_value) {
-      return RAII_Tracker<val_t_>(default_value);
+    static void set_file_path(const std::string &path) { file_path = path; }
+
+    template <typename val_t_, typename... Args>
+    static RAII_Tracker<val_t_> track(Args &&...args) {
+      return RAII_Tracker<val_t_>(val_t_(std::forward<Args>(args)...));
     }
   };
 
