@@ -12,8 +12,8 @@ namespace norb {
   // constexpr page_size_t MEMORY_SIZE = 4096 * 1248;
   // constexpr page_size_t PAGE_SIZE = 4096;
   // constexpr page_id_t LRU_K_INDEX = 3;
-  constexpr page_size_t MEMORY_SIZE = 16 * 3;
-  constexpr page_size_t PAGE_SIZE = 16;
+  constexpr page_size_t MEMORY_SIZE = 64 * 3;
+  constexpr page_size_t PAGE_SIZE = 64;
   constexpr page_id_t LRU_K_INDEX = 2;
   const std::string PMEM_FILE_NAME = "persistent_memory.db";
 }

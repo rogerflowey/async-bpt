@@ -176,21 +176,21 @@ namespace norb {
       HandledReference<page_id_t> &operator=(const HandledReference<page_id_t> &) = delete;
       HandledReference(HandledReference &&) = delete;
 
-      T *operator->() {
+      T *operator->() const {
         // if (get_instance().buffer_page_id[slot_id] != page_id) {
         //   allocate_page_and_update_slot();
         // }
         return reinterpret_cast<T *>(get_instance().buffer[slot_id]);
       }
 
-      T &operator*() {
+      T &operator*() const {
         // if (get_instance().buffer_page_id[slot_id] != page_id) {
         //   allocate_page_and_update_slot();
         // }
         return reinterpret_cast<T &>(get_instance().buffer[slot_id]);
       }
 
-      T *as_raw_ptr() {
+      T *as_raw_ptr() const {
         // if (get_instance().buffer_page_id[slot_id] != page_id) {
         //   allocate_page_and_update_slot();
         // }
@@ -236,21 +236,21 @@ namespace norb {
       ConstHandledReference<page_id_t> &operator = (const ConstHandledReference<page_id_t> &) = delete;
       ConstHandledReference(ConstHandledReference &&) = delete;
 
-      const T *operator->() {
+      const T *operator->() const {
         // if (get_instance().buffer_page_id[slot_id] != page_id) {
         //   allocate_page_and_update_slot();
         // }
         return reinterpret_cast<T *>(get_instance().buffer[slot_id]);
       }
 
-      const T &operator*() {
+      const T &operator*() const {
         // if (get_instance().buffer_page_id[slot_id] != page_id) {
         //   allocate_page_and_update_slot();
         // }
         return reinterpret_cast<const T &>(get_instance().buffer[slot_id]);
       }
 
-      const T *as_raw_ptr() {
+      const T *as_raw_ptr() const {
         // if (get_instance().buffer_page_id[slot_id] != page_id) {
         //   allocate_page_and_update_slot();
         // }

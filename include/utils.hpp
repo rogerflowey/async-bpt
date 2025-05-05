@@ -102,13 +102,42 @@ namespace norb {
     }
   } // namespace hash
 
-  // Returns whether the three given variables are in ascending order,
-  // non-strictly.
-  template <typename T_> bool ascend(T_ begin, T_ val, T_ end) {
-    return begin <= val && val <= end;
-  }
+  // simple array-related utils
+  namespace array {
+    template <typename T_>
+    void insert_at(T_ *array, const size_t &array_size, const size_t &pos,
+                   const T_ &new_val) {
+      memmove(array + pos + 1, array + pos, sizeof(T_) * (array_size - pos));
+      array[pos] = new_val;
+    }
 
-  inline bool ascend(const char *begin, const char *val, const char *end) {
-    return strcmp(begin, val) <= 0 && strcmp(val, end) <= 0;
-  }
+    template <typename T_>
+    void remove_at(T_ *array, const size_t &array_size, const size_t &pos) {
+      array[pos].~T_();
+      memmove(array + pos, array + pos + 1,
+              sizeof(T_) * (array_size - pos - 1));
+      if constexpr (!std::is_trivially_destructible_v<T_>)
+        memset(array + (array_size - 1), 0, sizeof(T_));
+    }
+
+    template <typename T_>
+    void migrate(T_ *dest, T_ *src, const size_t &migrate_count) {
+      memcpy(dest, src, sizeof(T_) * migrate_count);
+      if constexpr (!std::is_trivially_destructible_v<T_>)
+        memset(src, 0, sizeof(T_) * migrate_count);
+    }
+  } // namespace array
+
+  // unstructured stuff
+  namespace chore {
+    // Returns whether the three given variables are in ascending order,
+    // non-strictly.
+    template <typename T_> bool ascend(T_ begin, T_ val, T_ end) {
+      return begin <= val && val <= end;
+    }
+
+    inline bool ascend(const char *begin, const char *val, const char *end) {
+      return strcmp(begin, val) <= 0 && strcmp(val, end) <= 0;
+    }
+  }; // namespace chore
 } // namespace norb

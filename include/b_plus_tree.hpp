@@ -1,6 +1,478 @@
 #pragma once
 
 #include "persistent_memory.hpp"
+#include "stlite/filed_config.hpp"
+#include "stlite/pair.hpp"
 
-template <typename idx_t_, typename val_t>
-class BPlusTree;
+#include <functional>
+
+namespace norb {
+  template <typename idx_t_, typename val_t> class BPlusTree {
+  private:
+    using leaf_storage_t_ = Pair<idx_t_, val_t>;
+    using MutableHandle = PersistentMemory::MutableHandle;
+    template <typename val_t_>
+    using TrackedConfig = FiledConfig::tracker_t_<val_t_>;
+    using stack_frame_t_ = std::pair<MutableHandle, size_t>;
+    enum node_type { index, leaf };
+
+    struct IndexNode;
+    struct LeafNode;
+
+    TrackedConfig<size_t> tree_height = FiledConfig::track<size_t>(0);
+    TrackedConfig<size_t> tree_size = FiledConfig::track<size_t>(0);
+    TrackedConfig<MutableHandle> root_handle =
+        FiledConfig::track<MutableHandle>();
+
+    struct IndexNode {
+      static constexpr size_t aux_var_size = sizeof(size_t) * 2;
+      static constexpr size_t node_capacity =
+          (MEMORY_SIZE - aux_var_size) /
+              (sizeof(idx_t_) + sizeof(MutableHandle)) -
+          1;
+      static constexpr size_t merge_threshold = node_capacity * .25f;
+      static constexpr size_t split_threshold = node_capacity * .75f;
+      static_assert(MEMORY_SIZE - aux_var_size >
+                    (sizeof(idx_t_) + sizeof(MutableHandle)) + 1);
+      static_assert(node_capacity >= 4);
+
+      size_t layer = 0;
+      size_t size = 0;
+
+      idx_t_ data[node_capacity];
+      MutableHandle children[node_capacity + 1];
+      // MutableHandle parent;
+    };
+
+    struct LeafNode {
+      static constexpr size_t aux_var_size =
+          sizeof(size_t) + sizeof(MutableHandle);
+      static constexpr size_t node_capacity =
+          (MEMORY_SIZE - aux_var_size) / sizeof(leaf_storage_t_);
+      static constexpr size_t merge_threshold = node_capacity * .25f;
+      static constexpr size_t split_threshold = node_capacity * .75f;
+      static_assert(MEMORY_SIZE - aux_var_size > sizeof(leaf_storage_t_));
+      static_assert(node_capacity >= 4);
+
+      size_t size = 0;
+
+      leaf_storage_t_ data[node_capacity];
+      MutableHandle sibling;
+      // MutableHandle parent;
+    };
+
+    /**
+     * @brief Calculates the node that contains the beginning of key.
+     * @param node Const reference to the index node to check.
+     * @param key The key to search for.
+     * @return The index to the next node to search in.
+     */
+    static size_t lower_bound(const IndexNode &node, const key_t &key) {
+      size_t left = 0, right = node.size;
+      while (left < right) {
+        const size_t mid = (left + right) / 2;
+        if (node.data[mid] <= key)
+          right = mid;
+        else
+          left = mid + 1;
+      }
+      return left;
+    }
+
+    /**
+     * @brief Calculates the first key-val pair starting with no less than the
+     * given key.
+     * @param node Const reference to the leaf node to check.
+     * @param key The key to search for.
+     * @return The position of the appropriate pair, [important] maximum being
+     * node.size.
+     */
+    static size_t lower_bound(const LeafNode &node, const key_t &key) {
+      size_t left = 0, right = node.size;
+      while (left < right) {
+        const size_t mid = (left + right) / 2;
+        if (node.data[mid].first <= key)
+          right = mid;
+        else
+          left = mid + 1;
+      }
+      return left;
+    }
+
+    /**
+     * @brief Calculates the first key-val pair no less than the given key-val
+     * pair.
+     * @param node Const reference to the leaf node to check.
+     * @param target The key-val pair to search for.
+     * @return The position of the appropriate pair, [important] maximum being
+     * node.size.
+     */
+    static size_t lower_bound(const LeafNode &node,
+                              const leaf_storage_t_ &target) {
+      size_t left = 0, right = node.size;
+      while (left < right) {
+        const size_t mid = (left + right) / 2;
+        if (node.data[mid] <= target)
+          right = mid;
+        else
+          left = mid + 1;
+      }
+      return left;
+    }
+
+    std::pair<MutableHandle, vector<stack_frame_t_>>
+    stack_descend_to_leaf(const key_t &key) {
+      MutableHandle handle = root_handle.val;
+      vector<stack_frame_t_> history;
+      for (int i = 0; i < tree_height.val - 1; i++) {
+        const auto &index_node_ref = *handle.const_ref<IndexNode>();
+        const auto next_node_idx = lower_bound(index_node_ref, key);
+        history.push_back({handle, next_node_idx});
+        handle = index_node_ref.children[next_node_idx];
+        assert(!handle.is_nullptr());
+      } // travel down the tree
+      return std::make_pair(handle, history);
+    }
+
+    /**
+     * @brief Calculates a possible index a given pair can be inserted at.
+     * @param starting_block The leaf block to start looking from.
+     * @param target The desired key-val pair.
+     * @return pair of the mutable handle to the block and the position within
+     * that block.
+     */
+    std::pair<MutableHandle, size_t>
+    get_insertion_pos(const MutableHandle &starting_block,
+                      const leaf_storage_t_ &target) const {
+      MutableHandle leaf = starting_block;
+      const LeafNode *leaf_ptr = leaf.const_ref<LeafNode>().as_raw_ptr();
+      while (!leaf_ptr->sibling.is_nullptr()) {
+        if (leaf_ptr->data[leaf_ptr->size - 1] >= target)
+          break;
+        leaf = leaf_ptr->sibling;
+        leaf_ptr = leaf.const_ref<LeafNode>().as_raw_ptr();
+      }
+      return std::make_pair(leaf, lower_bound(*leaf_ptr, target));
+    }
+
+    // Auxiliary functions dealing with overflow and underflow
+
+    void handle_leaf_overflow(const stack_frame_t_ &frame) {
+      // three slots are needed to perform this function
+      auto parent_node_href = frame.first.ref<IndexNode>();
+      const size_t insert_at_pos = frame.second;
+      auto old_node_href =
+          parent_node_href->children[insert_at_pos].template ref<LeafNode>();
+      // dup the leaf node
+      const MutableHandle new_node_handle =
+          PersistentMemory::create_mutable_and_init<LeafNode>();
+      auto new_node_href = new_node_handle.ref<LeafNode>();
+      // update the sizes
+      const auto new_leaf_size =
+          (new_node_href->size = old_node_href->size / 2);
+      const auto remaining_size = (old_node_href->size -= new_leaf_size);
+      // migrate the contents
+      // [Boost] Consider removing memset to boost performance around 1x
+      array::migrate(new_node_href->data, old_node_href->data + remaining_size,
+                     new_leaf_size);
+      // change the sib pointers
+      new_node_href->sibling = old_node_href->sibling;
+      old_node_href->sibling = new_node_handle;
+      // insert into parent
+      array::insert_at(parent_node_href->data, parent_node_href->size,
+                       insert_at_pos, new_node_href->data[0].first);
+      array::insert_at(parent_node_href->children, parent_node_href->size,
+                       insert_at_pos + 1, new_node_handle);
+      ++parent_node_href->size;
+    }
+
+    void handle_index_overflow(const stack_frame_t_ &frame) {
+      auto parent_node_href = frame.first.ref<IndexNode>();
+      const size_t insert_at_pos = frame.second;
+      auto old_node_href =
+          parent_node_href->children[insert_at_pos].template ref<IndexNode>();
+      const MutableHandle new_node_handle =
+          PersistentMemory::create_mutable_and_init<IndexNode>();
+      auto new_node_href = new_node_handle.ref<IndexNode>();
+      // update the sizes
+      new_node_href->layer = old_node_href->layer;
+      const size_t new_node_size = new_node_href->size =
+          old_node_href->size / 2;
+      const size_t old_node_size = old_node_href->size -= new_node_size;
+      // migrate the contents
+      array::migrate(new_node_href->data, old_node_href->data + old_node_size,
+                     new_node_size);
+      array::migrate(new_node_href->children,
+                     old_node_href->children + old_node_size, new_node_size);
+      // insert into parent
+      array::insert_at(parent_node_href->data, parent_node_href->size,
+                       insert_at_pos, new_node_href->data[0]);
+      array::insert_at(parent_node_href->children, parent_node_href->size,
+                       insert_at_pos + 1, new_node_handle);
+      ++parent_node_href->size;
+    }
+
+    void handle_root_overflow(const node_type &root_node_is) {
+      const auto new_root_handle =
+          PersistentMemory::create_mutable_and_init<IndexNode>();
+      auto new_root_href = new_root_handle.template ref<IndexNode>();
+      new_root_href->layer = tree_height.val++;
+      new_root_href->children[0] = root_handle.val;
+      if (root_node_is == node_type::index)
+        handle_index_overflow({new_root_handle, 0});
+      else
+        handle_leaf_overflow({new_root_handle, 0});
+    }
+
+    /**
+     * @brief Merge a leaf's right sibling into the node.
+     * @param node_id The number of the node in the sequence of the parent.
+     * @note Side effects: the parent will be updated regarding size and proper
+     * data. The function assumes that a right leaf exists.
+     */
+    void merge_leaf_with_right(const stack_frame_t_ &frame,
+                               const size_t &node_id) {
+      auto parent_node_href = frame.first.ref<IndexNode>();
+      const size_t insert_at_pos = frame.second;
+      auto old_node_href =
+          parent_node_href->children[insert_at_pos]->template ref<LeafNode>();
+      auto right_node_href = old_node_href->sibling->template ref<LeafNode>();
+      // migrate the contents
+      array::migrate(old_node_href->data + old_node_href->size,
+                     right_node_href->data, right_node_href->size);
+      // migrate the sibling
+      old_node_href->sibling = right_node_href->sibling;
+      right_node_href->sibling.set_nullptr();
+      // change the parent
+      array::remove_at(parent_node_href->data, node_id);
+      array::remove_at(parent_node_href->children, node_id + 1);
+      --parent_node_href->size;
+      // remove the page
+      PersistentMemory::remove<LeafNode>(right_node_href);
+    }
+
+    /**
+     * @return Whether going on is needed.
+     */
+    bool handle_leaf_underflow(const stack_frame_t_ &frame) {
+      // A. borrow if possible
+      auto parent_node_href = frame.first.ref<IndexNode>();
+      const size_t old_child_at_pos = frame.second;
+      auto old_child_handle = parent_node_href->children[old_child_at_pos];
+      auto old_child_href = old_child_handle.template ref<LeafNode>();
+      // A1. borrow from left
+      if (old_child_at_pos != 0 &&
+          parent_node_href->children[old_child_at_pos - 1]
+                  .template const_ref<LeafNode>()
+                  ->size > LeafNode::merge_threshold + 1) {
+        auto left_child_href = parent_node_href->children[old_child_at_pos - 1]
+                                   .template ref<LeafNode>();
+        const auto to_insert = left_child_href->data[--left_child_href->size];
+        array::insert_at(old_child_href->data, old_child_href->size++, 0,
+                         to_insert);
+        // update the parent
+        parent_node_href->data[old_child_at_pos] = to_insert;
+        return false;
+      }
+      // A2. borrow from right
+      if (old_child_at_pos != parent_node_href->size &&
+          parent_node_href->children[old_child_at_pos + 1]
+                  .template const_ref<LeafNode>()
+                  ->size > LeafNode::merge_threshold + 1) {
+        auto right_child_href =
+            parent_node_href->children[old_child_at_pos + 1];
+        const auto to_insert = right_child_href->data[0];
+        array::remove_at(right_child_href, right_child_href->size, 0);
+        --right_child_href->size;
+        old_child_href->data[old_child_href->size++] = to_insert;
+        // update the parent
+        parent_node_href->data[old_child_at_pos + 1] =
+            right_child_href->data[0]; // this is the new data
+        return false;
+      }
+      // Borrow failed: merge with sibling
+      if (old_child_at_pos != parent_node_href->size)
+        merge_leaf_with_right(frame, old_child_at_pos);
+      else
+        merge_leaf_with_right(frame, old_child_at_pos - 1);
+      return true;
+    }
+
+    bool handle_index_underflow(const stack_frame_t_ &frame) {
+      // A. borrow if possible
+      auto parent_node_href = frame.first.ref<IndexNode>();
+      const size_t old_child_at_pos = frame.second;
+      auto old_child_handle = parent_node_href->children[old_child_at_pos];
+      auto old_child_href = old_child_handle.template ref<IndexNode>();
+      // A1. borrow from left
+      if (old_child_at_pos != 0 &&
+          parent_node_href->children[old_child_at_pos - 1]
+                  .template const_ref<IndexNode>()
+                  ->size > IndexNode::merge_threshold + 1) {
+        auto left_child_href = parent_node_href->children[old_child_at_pos - 1]
+                                   .template ref<IndexNode>();
+        // push the new data
+        array::insert_at(old_child_href->data, old_child_href->size, 0,
+                         old_child_href->children[0]);
+        const auto child_to_insert =
+            left_child_href->children[left_child_href->size];
+        array::insert_at(old_child_href->children, old_child_href->size, 0,
+                         child_to_insert);
+        // update the parent
+        parent_node_href->data[old_child_at_pos] = data_to_insert;
+        return false;
+      }
+      // A2. borrow from right
+      if (old_child_at_pos != parent_node_href->size &&
+          parent_node_href->children[old_child_at_pos + 1]
+                  .template const_ref<IndexNode>()
+                  ->size > IndexNode::merge_threshold + 1) {
+        auto right_child_href =
+            parent_node_href->children[old_child_at_pos + 1];
+        const auto to_insert = right_child_href->children[0];
+        array::remove_at(right_child_href, right_child_href->size, 0);
+        --right_child_href->size;
+        old_child_href->data[old_child_href->size++] = to_insert;
+        // update the parent
+        parent_node_href->data[old_child_at_pos + 1] =
+            right_child_href->data[0]; // this is the new data
+        return false;
+      }
+    }
+
+  public:
+    BPlusTree() = default;
+    ~BPlusTree() = default;
+
+    [[nodiscard]] size_t size() const { return tree_size.val; }
+
+    /**
+     * @brief Find all entries registered under a given key and perform an
+     * action sequentially on them, ordered by value.
+     * @param key The key to match.
+     * @param function The function to perform.
+     */
+    void find_all_do(const idx_t_ &key,
+                     const std::function<void(const val_t &)> &function) const {
+      if (tree_height.val == 0)
+        return;
+      MutableHandle handle = root_handle.val;
+      for (int i = 0; i < tree_height.val - 1; i++) {
+        const auto &index_node_ref = *handle.const_ref<IndexNode>();
+        const auto next_node_idx = lower_bound(index_node_ref, key);
+        handle = index_node_ref.children[next_node_idx];
+        assert(!handle.is_nullptr());
+      }
+      // finally, handle should point to a leaf node
+      const LeafNode *leaf_node_ref = handle.const_ref<LeafNode>().as_raw_ptr();
+      size_t cur = lower_bound(*leaf_node_ref, key);
+      while (true) {
+        for (; cur < leaf_node_ref->size; ++cur) {
+          if (leaf_node_ref->data[cur].first != key)
+            return;
+          function(leaf_node_ref->data[cur].second);
+        }
+        // reset cur and move on to the next node
+        cur = 0;
+        handle = leaf_node_ref->sibling;
+        if (handle.is_nullptr())
+          return;
+        leaf_node_ref = handle.const_ref<LeafNode>().as_raw_ptr();
+      }
+    }
+
+    /**
+     * @brief Find all entries registered under a key and return them in a
+     * norb::vector.
+     * @param key The key to match.
+     * @return A vector containing all found entries.
+     */
+    [[nodiscard]] vector<val_t> find_all(const idx_t_ &key) const {
+      vector<val_t> ret;
+      const auto lambda = [&ret](const val_t &val) { ret.push_back(val); };
+      find_all_do(key, lambda);
+      return ret;
+    }
+
+    /**
+     * @brief Register a key-value pair.
+     * @param key The key to register under.
+     * @param val The value to register.
+     */
+    void insert(const idx_t_ &key, const val_t &val) {
+      ++tree_size.val;
+      if (tree_height.val == 0) {
+        // create the first node and insert the element
+        root_handle.val = PersistentMemory::create_mutable_and_init<LeafNode>();
+        LeafNode &node = *root_handle.val.ref<LeafNode>();
+        node.data[node.size++] = norb::make_pair(key, val);
+        ++tree_height.val;
+        return;
+      }
+      auto [handle, history] = stack_descend_to_leaf(key);
+      auto [leaf_node_handle, within_leaf_node_pos] =
+          get_insertion_pos(handle, norb::make_pair(key, val));
+      auto leaf_node_href = leaf_node_handle.template ref<LeafNode>();
+      array::insert_at(leaf_node_href->data, leaf_node_href->size,
+                       within_leaf_node_pos, make_pair(key, val));
+      // if exceeds the upperbound, travel up
+      int cur = history.size() - 1;
+      if (leaf_node_href->size >= LeafNode::split_threshold)
+        handle_leaf_overflow(history[cur--]);
+      while (history[cur].first.template const_ref<IndexNode>()->size >=
+             IndexNode::split_threshold)
+        handle_index_overflow(history[cur--]);
+      // handle root
+      if (tree_size.val == 1 &&
+          root_handle.val.template const_ref<LeafNode>()->size >=
+              LeafNode::split_threshold)
+        handle_root_overflow(node_type::leaf);
+      else if (tree_size.val > 1 &&
+               root_handle.val.const_ref<IndexNode>()->size >=
+                   IndexNode::split_threshold)
+        handle_root_overflow(node_type::index);
+    }
+
+    /**
+     * @brief Remove a key-value pair.
+     * @param key The key to match.
+     * @param val The value to match.
+     * @return Whether the removal is successful.
+     */
+    bool remove(const idx_t_ &key, const val_t &val) {
+      if (tree_height.val == 0)
+        return false;
+      auto [handle, history] = stack_descend_to_leaf(key);
+      auto [leaf_node_handle, within_leaf_node_pos] =
+          get_insertion_pos(handle, norb::make_pair(key, val));
+      if (const auto leaf_node_const_href =
+              leaf_node_handle.template const_ref<LeafNode>();
+          leaf_node_const_href->size <= within_leaf_node_pos ||
+          leaf_node_const_href->data[within_leaf_node_pos].second != key)
+        return false;
+      // the value exists and the pair should be removed
+      const auto leaf_node_href = leaf_node_handle.template ref<LeafNode>();
+      array::remove_at(leaf_node_href->data, leaf_node_href->size,
+                       within_leaf_node_pos);
+      if (tree_height.val == 1) {
+        if (--leaf_node_href->size == 0) {
+          // destruct that only block
+          PersistentMemory::remove<LeafNode>(root_handle.val);
+          root_handle.val =
+              PersistentMemory::MutableHandle(); // this will result in nullptr
+          tree_size.val = 0;
+        }
+      } else {
+        int cur = history.size() - 1; // cursor on the history stack
+        bool go_on = true;
+        if ((--leaf_node_href->template size) <= LeafNode::merge_threshold)
+          go_on = handle_leaf_underflow(history[cur--]);
+        if (!go_on)
+          return true;
+        while (cur >= 0) {
+          go_on = handle_
+        }
+      }
+    }
+  };
+} // namespace norb
