@@ -33,14 +33,17 @@ namespace norb {
       static constexpr size_t merge_threshold = node_capacity * .25f;
       static constexpr size_t split_threshold = node_capacity * .75f;
       static_assert(MEMORY_SIZE - aux_var_size >
-                    (sizeof(idx_t_) + sizeof(MutableHandle)) + 1);
+                    (sizeof(idx_t_) + sizeof(MutableHandle)));
       static_assert(node_capacity >= 4);
 
       size_t layer = 0;
       size_t size = 0;
 
+      /**
+       * Now data refers to the smallest element that has been in the child
+       */
       idx_t_ data[node_capacity];
-      MutableHandle children[node_capacity + 1];
+      MutableHandle children[node_capacity];
       // MutableHandle parent;
     };
 
@@ -68,7 +71,7 @@ namespace norb {
      * @return The index to the next node to search in.
      */
     static size_t lower_bound(const IndexNode &node, const key_t &key) {
-      size_t left = 0, right = node.size;
+      size_t left = 0, right = node.size - 1;
       while (left < right) {
         const size_t mid = (left + right) / 2;
         if (node.data[mid] <= key)
@@ -88,7 +91,7 @@ namespace norb {
      * node.size.
      */
     static size_t lower_bound(const LeafNode &node, const key_t &key) {
-      size_t left = 0, right = node.size;
+      size_t left = 0, right = node.size - 1;
       while (left < right) {
         const size_t mid = (left + right) / 2;
         if (node.data[mid].first <= key)
@@ -145,7 +148,7 @@ namespace norb {
     get_insertion_pos(const MutableHandle &starting_block,
                       const leaf_storage_t_ &target) const {
       MutableHandle leaf = starting_block;
-      const LeafNode *leaf_ptr = leaf.const_ref<LeafNode>().as_raw_ptr();
+      auto leaf_ptr = leaf.const_ref<LeafNode>().as_raw_ptr();
       while (!leaf_ptr->sibling.is_nullptr()) {
         if (leaf_ptr->data[leaf_ptr->size - 1] >= target)
           break;
@@ -180,7 +183,7 @@ namespace norb {
       old_node_href->sibling = new_node_handle;
       // insert into parent
       array::insert_at(parent_node_href->data, parent_node_href->size,
-                       insert_at_pos, new_node_href->data[0].first);
+                       insert_at_pos + 1, new_node_href->data[0].first);
       array::insert_at(parent_node_href->children, parent_node_href->size,
                        insert_at_pos + 1, new_node_handle);
       ++parent_node_href->size;
@@ -206,7 +209,7 @@ namespace norb {
                      old_node_href->children + old_node_size, new_node_size);
       // insert into parent
       array::insert_at(parent_node_href->data, parent_node_href->size,
-                       insert_at_pos, new_node_href->data[0]);
+                       insert_at_pos + 1, new_node_href->data[0]);
       array::insert_at(parent_node_href->children, parent_node_href->size,
                        insert_at_pos + 1, new_node_handle);
       ++parent_node_href->size;
@@ -217,7 +220,15 @@ namespace norb {
           PersistentMemory::create_mutable_and_init<IndexNode>();
       auto new_root_href = new_root_handle.template ref<IndexNode>();
       new_root_href->layer = tree_height.val++;
+      new_root_href->size = 1;
+      if (root_node_is == node_type::index)
+        new_root_href->data[0] =
+            root_handle.val.const_ref<LeafNode>()->data[0].first;
+      else
+        new_root_href->data[0] =
+            root_handle.val.const_ref<IndexNode>()->data[0];
       new_root_href->children[0] = root_handle.val;
+      root_handle.val = new_root_handle;
       if (root_node_is == node_type::index)
         handle_index_overflow({new_root_handle, 0});
       else
@@ -235,20 +246,54 @@ namespace norb {
       auto parent_node_href = frame.first.ref<IndexNode>();
       const size_t insert_at_pos = frame.second;
       auto old_node_href =
-          parent_node_href->children[insert_at_pos]->template ref<LeafNode>();
-      auto right_node_href = old_node_href->sibling->template ref<LeafNode>();
+          parent_node_href->children[insert_at_pos].template ref<LeafNode>();
+      auto right_node_handle = old_node_href->sibling;
+      auto right_node_href = right_node_handle.template ref<LeafNode>();
       // migrate the contents
       array::migrate(old_node_href->data + old_node_href->size,
                      right_node_href->data, right_node_href->size);
+      old_node_href->size += right_node_href->size;
       // migrate the sibling
       old_node_href->sibling = right_node_href->sibling;
       right_node_href->sibling.set_nullptr();
       // change the parent
-      array::remove_at(parent_node_href->data, node_id);
-      array::remove_at(parent_node_href->children, node_id + 1);
+      array::remove_at(parent_node_href->data, parent_node_href->size,
+                       node_id + 1);
+      array::remove_at(parent_node_href->children, parent_node_href->size,
+                       node_id + 1);
       --parent_node_href->size;
       // remove the page
-      PersistentMemory::remove<LeafNode>(right_node_href);
+      PersistentMemory::remove<LeafNode>(right_node_handle);
+    }
+
+    /**
+     * @brief Merge an index's right sibling into the node.
+     * @param node_id The number of the node in the sequence of the parent.
+     * @note Side effects: the parent will be updated regarding size and proper
+     * data. The function assumes that a right leaf exists.
+     */
+    void merge_index_with_right(const stack_frame_t_ &frame,
+                                const size_t &node_id) {
+      auto parent_node_href = frame.first.ref<IndexNode>();
+      const size_t insert_at_pos = frame.second;
+      auto old_node_href =
+          parent_node_href->children[insert_at_pos].template ref<IndexNode>();
+      auto right_node_handle = parent_node_href->children[insert_at_pos + 1];
+      auto right_node_href = right_node_handle.template ref<IndexNode>();
+      // migrate the contents
+      array::migrate(old_node_href->data + old_node_href->size,
+                     right_node_href->data, right_node_href->size);
+      array::migrate(old_node_href->children + old_node_href->size,
+                     right_node_href->children, right_node_href->size);
+      old_node_href->size += right_node_href->size;
+      // change the parent
+      array::remove_at(parent_node_href->data, parent_node_href->size,
+                       node_id + 1);
+      array::remove_at(parent_node_href->children, parent_node_href->size,
+                       node_id + 1);
+      --parent_node_href->size;
+      // remove the page
+      PersistentMemory::remove<LeafNode>(right_node_handle);
     }
 
     /**
@@ -271,7 +316,7 @@ namespace norb {
         array::insert_at(old_child_href->data, old_child_href->size++, 0,
                          to_insert);
         // update the parent
-        parent_node_href->data[old_child_at_pos] = to_insert;
+        parent_node_href->data[old_child_at_pos] = to_insert.first;
         return false;
       }
       // A2. borrow from right
@@ -279,18 +324,18 @@ namespace norb {
           parent_node_href->children[old_child_at_pos + 1]
                   .template const_ref<LeafNode>()
                   ->size > LeafNode::merge_threshold + 1) {
-        auto right_child_href =
-            parent_node_href->children[old_child_at_pos + 1];
+        auto right_child_href = parent_node_href->children[old_child_at_pos + 1]
+                                    .template ref<LeafNode>();
         const auto to_insert = right_child_href->data[0];
-        array::remove_at(right_child_href, right_child_href->size, 0);
-        --right_child_href->size;
+        array::remove_at(right_child_href->data, right_child_href->size, 0);
+        --(right_child_href->size);
         old_child_href->data[old_child_href->size++] = to_insert;
         // update the parent
         parent_node_href->data[old_child_at_pos + 1] =
-            right_child_href->data[0]; // this is the new data
+            right_child_href->data[0].first; // this is the new data
         return false;
       }
-      // Borrow failed: merge with sibling
+      // B. merge with sibling if not
       if (old_child_at_pos != parent_node_href->size)
         merge_leaf_with_right(frame, old_child_at_pos);
       else
@@ -312,31 +357,64 @@ namespace norb {
         auto left_child_href = parent_node_href->children[old_child_at_pos - 1]
                                    .template ref<IndexNode>();
         // push the new data
+        const auto left_size = left_child_href->size;
+        auto data_to_insert = left_child_href->data[left_size - 1];
+        auto child_to_insert = left_child_href->children[left_size - 1];
         array::insert_at(old_child_href->data, old_child_href->size, 0,
-                         old_child_href->children[0]);
-        const auto child_to_insert =
-            left_child_href->children[left_child_href->size];
+                         data_to_insert);
         array::insert_at(old_child_href->children, old_child_href->size, 0,
                          child_to_insert);
-        // update the parent
+        ++old_child_href->size;
+        // remove the old data
+        left_child_href->data[left_size - 1].~idx_t_();
+        left_child_href->children[left_size - 1].~MutableHandle();
+        --left_child_href->size;
+        // update parent
         parent_node_href->data[old_child_at_pos] = data_to_insert;
         return false;
       }
       // A2. borrow from right
-      if (old_child_at_pos != parent_node_href->size &&
+      if (old_child_at_pos != parent_node_href->size - 1 &&
           parent_node_href->children[old_child_at_pos + 1]
                   .template const_ref<IndexNode>()
                   ->size > IndexNode::merge_threshold + 1) {
-        auto right_child_href =
-            parent_node_href->children[old_child_at_pos + 1];
-        const auto to_insert = right_child_href->children[0];
-        array::remove_at(right_child_href, right_child_href->size, 0);
+        auto right_child_href = parent_node_href->children[old_child_at_pos]
+                                    .template ref<IndexNode>();
+        // push the new data
+        auto data_to_insert = right_child_href->data[0];
+        auto child_to_insert = right_child_href->children[0];
+        const auto old_size = old_child_href->size;
+        old_child_href->data[old_size] = data_to_insert;
+        old_child_href->children[old_size] = child_to_insert;
+        ++old_child_href->size;
+        // remove the old data
+        array::remove_at(right_child_href->data, right_child_href->size, 0);
+        array::remove_at(right_child_href->children, right_child_href->size, 0);
         --right_child_href->size;
-        old_child_href->data[old_child_href->size++] = to_insert;
-        // update the parent
+        // update parent
         parent_node_href->data[old_child_at_pos + 1] =
-            right_child_href->data[0]; // this is the new data
+            right_child_href->data[0]; // the new data (the new minimum)
         return false;
+      }
+      // B. merge if not
+      if (old_child_at_pos != parent_node_href->size)
+        merge_index_with_right(frame, old_child_at_pos);
+      else
+        merge_index_with_right(frame, old_child_at_pos - 1);
+      return true;
+    }
+
+    void handle_root_underflow(const node_type &root_node_is) {
+      // this is simple: the root will underflow only when it contains exactly
+      // one element
+      tree_height.val -= 1;
+      const auto old_root_handle = root_handle.val;
+      if (root_node_is == node_type::index) {
+        root_handle.val = old_root_handle.const_ref<IndexNode>()->children[0];
+        PersistentMemory::remove<IndexNode>(old_root_handle);
+      } else {
+        root_handle.val.set_nullptr();
+        PersistentMemory::remove<LeafNode>(old_root_handle);
       }
     }
 
@@ -451,28 +529,28 @@ namespace norb {
           leaf_node_const_href->data[within_leaf_node_pos].second != key)
         return false;
       // the value exists and the pair should be removed
+      --tree_size.val;
       const auto leaf_node_href = leaf_node_handle.template ref<LeafNode>();
       array::remove_at(leaf_node_href->data, leaf_node_href->size,
                        within_leaf_node_pos);
-      if (tree_height.val == 1) {
-        if (--leaf_node_href->size == 0) {
-          // destruct that only block
-          PersistentMemory::remove<LeafNode>(root_handle.val);
-          root_handle.val =
-              PersistentMemory::MutableHandle(); // this will result in nullptr
-          tree_size.val = 0;
-        }
-      } else {
-        int cur = history.size() - 1; // cursor on the history stack
-        bool go_on = true;
-        if ((--leaf_node_href->template size) <= LeafNode::merge_threshold)
-          go_on = handle_leaf_underflow(history[cur--]);
+      int cur = history.size() - 1; // cursor on the history stack
+      bool go_on = true;
+      if ((--leaf_node_href->template size) <= LeafNode::merge_threshold)
+        go_on = handle_leaf_underflow(history[cur--]);
+      if (!go_on)
+        return true;
+      while (cur >= 0) {
+        go_on = handle_index_underflow(history[cur--]);
         if (!go_on)
           return true;
-        while (cur >= 0) {
-          go_on = handle_
-        }
       }
+      if (root_handle.val.template const_ref<LeafNode>()->size <= 1) {
+        if (tree_height.val == 1)
+          handle_root_underflow(node_type::leaf);
+        else
+          handle_root_underflow(node_type::index);
+      }
+      return true;
     }
   };
 } // namespace norb
