@@ -13,8 +13,13 @@ int main() {
   bpt.traverse();
   bpt.insert(1, 1);
   bpt.traverse();
-  bpt.insert(6, 6); // todo: check why the separation point is set as 2 not 1
+  bpt.insert(6, 6);
   bpt.traverse();
   assert(bpt.size() == 6);
   assert(norb::array::equals(bpt.find_all(1), {1}));
+  assert(bpt.remove(1, 1) == true);
+  bpt.traverse();
+  assert(norb::array::equals(bpt.find_all(2), {2}));
+  assert(norb::array::equals(bpt.find_all(1), {}));
+  assert(bpt.size() == 5);
 }

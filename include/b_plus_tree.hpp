@@ -118,7 +118,7 @@ namespace norb {
       size_t left = 0, right = node.size;
       while (left < right) {
         const size_t mid = (left + right) / 2;
-        if (node.data[mid] > target)
+        if (node.data[mid] >= target)
           right = mid;
         else
           left = mid + 1;
@@ -225,7 +225,7 @@ namespace norb {
       auto new_root_href = new_root_handle.template ref<IndexNode>();
       new_root_href->layer = tree_height.val++;
       new_root_href->size = 1;
-      if (root_node_is == node_type::index)
+      if (root_node_is == node_type::leaf)
         new_root_href->data[0] =
             root_handle.val.const_ref<LeafNode>()->data[0].first;
       else
