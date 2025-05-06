@@ -5,6 +5,7 @@
 #include "stlite/pair.hpp"
 
 #include <functional>
+#include <queue>
 
 namespace norb {
   template <typename idx_t_, typename val_t> class BPlusTree {
@@ -26,13 +27,14 @@ namespace norb {
 
     struct IndexNode {
       static constexpr size_t aux_var_size = sizeof(size_t) * 2;
-      static constexpr size_t node_capacity =
-          (MEMORY_SIZE - aux_var_size) /
-              (sizeof(idx_t_) + sizeof(MutableHandle)) -
-          1;
+      // static constexpr size_t node_capacity =
+      //     (PAGE_SIZE - aux_var_size) /
+      //         (sizeof(idx_t_) + sizeof(MutableHandle)) -
+      //     1;
+      static constexpr size_t node_capacity = OVERWRITE_BLOCK_SIZE;
       static constexpr size_t merge_threshold = node_capacity * .25f;
       static constexpr size_t split_threshold = node_capacity * .75f;
-      static_assert(MEMORY_SIZE - aux_var_size >
+      static_assert(PAGE_SIZE - aux_var_size >
                     (sizeof(idx_t_) + sizeof(MutableHandle)));
       static_assert(node_capacity >= 4);
 
@@ -50,11 +52,12 @@ namespace norb {
     struct LeafNode {
       static constexpr size_t aux_var_size =
           sizeof(size_t) + sizeof(MutableHandle);
-      static constexpr size_t node_capacity =
-          (MEMORY_SIZE - aux_var_size) / sizeof(leaf_storage_t_);
+      // static constexpr size_t node_capacity =
+      //     (PAGE_SIZE - aux_var_size) / sizeof(leaf_storage_t_);
+      static constexpr size_t node_capacity = OVERWRITE_BLOCK_SIZE;
       static constexpr size_t merge_threshold = node_capacity * .25f;
       static constexpr size_t split_threshold = node_capacity * .75f;
-      static_assert(MEMORY_SIZE - aux_var_size > sizeof(leaf_storage_t_));
+      static_assert(PAGE_SIZE - aux_var_size > sizeof(leaf_storage_t_));
       static_assert(node_capacity >= 4);
 
       size_t size = 0;
@@ -71,15 +74,15 @@ namespace norb {
      * @return The index to the next node to search in.
      */
     static size_t lower_bound(const IndexNode &node, const key_t &key) {
-      size_t left = 0, right = node.size - 1;
+      size_t left = 0, right = node.size;
       while (left < right) {
         const size_t mid = (left + right) / 2;
-        if (node.data[mid] <= key)
+        if (node.data[mid] >= key)
           right = mid;
         else
           left = mid + 1;
       }
-      return left;
+      return (left > 1) ? (left - 1) : 0;
     }
 
     /**
@@ -94,7 +97,7 @@ namespace norb {
       size_t left = 0, right = node.size - 1;
       while (left < right) {
         const size_t mid = (left + right) / 2;
-        if (node.data[mid].first <= key)
+        if (node.data[mid].first >= key)
           right = mid;
         else
           left = mid + 1;
@@ -115,7 +118,7 @@ namespace norb {
       size_t left = 0, right = node.size;
       while (left < right) {
         const size_t mid = (left + right) / 2;
-        if (node.data[mid] <= target)
+        if (node.data[mid] > target)
           right = mid;
         else
           left = mid + 1;
@@ -150,7 +153,8 @@ namespace norb {
       MutableHandle leaf = starting_block;
       auto leaf_ptr = leaf.const_ref<LeafNode>().as_raw_ptr();
       while (!leaf_ptr->sibling.is_nullptr()) {
-        if (leaf_ptr->data[leaf_ptr->size - 1] >= target)
+        if ((leaf_ptr->template size) < LeafNode::split_threshold ||
+            leaf_ptr->data[leaf_ptr->size - 1] >= target)
           break;
         leaf = leaf_ptr->sibling;
         leaf_ptr = leaf.const_ref<LeafNode>().as_raw_ptr();
@@ -493,19 +497,21 @@ namespace norb {
       auto leaf_node_href = leaf_node_handle.template ref<LeafNode>();
       array::insert_at(leaf_node_href->data, leaf_node_href->size,
                        within_leaf_node_pos, make_pair(key, val));
+      ++leaf_node_href->size;
       // if exceeds the upperbound, travel up
       int cur = history.size() - 1;
-      if (leaf_node_href->size >= LeafNode::split_threshold)
+      if (leaf_node_href->size >= LeafNode::split_threshold && cur >= 0)
         handle_leaf_overflow(history[cur--]);
-      while (history[cur].first.template const_ref<IndexNode>()->size >=
-             IndexNode::split_threshold)
+      while (cur >= 0 &&
+             history[cur].first.template const_ref<IndexNode>()->size >=
+                 IndexNode::split_threshold)
         handle_index_overflow(history[cur--]);
       // handle root
-      if (tree_size.val == 1 &&
+      if (tree_height.val == 1 &&
           root_handle.val.template const_ref<LeafNode>()->size >=
               LeafNode::split_threshold)
         handle_root_overflow(node_type::leaf);
-      else if (tree_size.val > 1 &&
+      else if (tree_height.val > 1 &&
                root_handle.val.const_ref<IndexNode>()->size >=
                    IndexNode::split_threshold)
         handle_root_overflow(node_type::index);
@@ -551,6 +557,125 @@ namespace norb {
           handle_root_underflow(node_type::index);
       }
       return true;
+    }
+
+    void traverse(const bool &do_check = false) const {
+      std::cout << "--- Traversing B+ Tree (" << this << ") ---" << std::endl;
+      std::cout << "[Info] Size: " << tree_size.val
+                << ", Height: " << tree_height.val << std::endl;
+
+      if (root_handle.val.is_nullptr()) {
+        std::cout << "[Tree] Empty" << std::endl;
+        std::cout << "--- End Traversal ---" << std::endl;
+        return;
+      }
+
+      std::cout << "[Info] Root Page ID: " << root_handle.val.page_id
+                << std::endl;
+
+      std::queue<std::pair<MutableHandle, size_t>> q; // Store {Handle, Level}
+      q.emplace(root_handle.val, 0); // Start with root at level 0
+
+      size_t current_level = 0;
+      std::cout << "Level " << current_level << ":" << std::endl;
+
+      while (!q.empty()) {
+        auto [current_handle, node_level] = q.front();
+        q.pop();
+
+        // Check if we moved to a new level
+        if (node_level > current_level) {
+          current_level = node_level;
+          std::cout << "Level " << current_level << ":" << std::endl;
+        }
+
+        // Determine node type based on level
+        // Leaves are at level tree_height - 1
+        bool is_leaf = (node_level == tree_height.val - 1);
+
+        std::cout << "  Node (Page ID: " << current_handle.page_id << ") ";
+
+        if (is_leaf) {
+          // --- Print Leaf Node ---
+          assert(!current_handle.is_nullptr() && "Corrupted handle");
+          auto node_ref = current_handle.const_ref<LeafNode>();
+
+          std::cout << "[Leaf] Size: " << node_ref->size << " | Sibling: "
+                    << (node_ref->sibling.is_nullptr()
+                            ? "NULL"
+                            : std::to_string(node_ref->sibling.page_id))
+                    << " | Data: [";
+          for (size_t i = 0; i < node_ref->size; ++i) {
+            std::cout << "(" << node_ref->data[i].first << ","
+                      << node_ref->data[i].second << ")"
+                      << (i == node_ref->size - 1 ? "" : ", ");
+          }
+          std::cout << "]" << std::endl;
+
+          // Optional checks for leaf node (if do_check is true)
+          if (do_check) {
+            // Check key order
+            for (size_t i = 0; i + 1 < node_ref->size; ++i) {
+              assert(node_ref->data[i] <= node_ref->data[i + 1] &&
+                     "Leaf key order violation");
+            }
+            // Check size constraints (except for root if it's the only node)
+            if (tree_height.val > 1) { // Not root
+              assert(node_ref->size >= LeafNode::merge_threshold &&
+                     "Leaf underflow violation");
+            }
+            assert(node_ref->size <= LeafNode::node_capacity &&
+                   "Leaf overflow violation");
+          }
+
+        } else {
+          // --- Print Index Node ---
+          assert(!current_handle.is_nullptr() && "Corrupted handle");
+          auto node_ref = current_handle.const_ref<IndexNode>();
+
+          std::cout << "[Index] Size: " << node_ref->size
+                    << " (Layer: " << node_ref->layer << ") | Children/Keys: ";
+
+          // Print children and keys interleaved
+          for (size_t i = 0; i < node_ref->size; ++i) {
+            // Print child pointer
+            std::cout << "C" << i << ":";
+            if (node_ref->children[i].is_nullptr()) {
+              std::cout << "NULL";
+            } else {
+              std::cout << node_ref->children[i].page_id;
+              // Enqueue child for the next level
+              q.push({node_ref->children[i], node_level + 1});
+            }
+            std::cout << "[" << node_ref->data[i] << ", "
+                      << node_ref->data[i + 1] << "] ";
+          }
+          std::cout << std::endl;
+
+          // Optional checks for index node (if do_check is true)
+          if (do_check) {
+            // Check key order
+            for (size_t i = 0; i + 1 < node_ref->size; ++i) {
+              assert(node_ref->data[i] <= node_ref->data[i + 1] &&
+                     "Index key order violation");
+            }
+            // Check size constraints (except for root)
+            if (node_level > 0) { // Not root
+              assert(node_ref->size >= IndexNode::merge_threshold &&
+                     "Index underflow violation");
+            }
+            assert(node_ref->size <= IndexNode::node_capacity &&
+                   "Index overflow violation");
+            // Basic check: Ensure children handles are not null (unless error
+            // state)
+            for (size_t i = 0; i <= node_ref->size; ++i) {
+              assert(!node_ref->children[i].is_nullptr() &&
+                     "Index node has null child pointer");
+            }
+          }
+        }
+      }
+      std::cout << "--- End Traversal ---" << std::endl;
     }
   };
 } // namespace norb

@@ -126,6 +126,15 @@ namespace norb {
       if constexpr (!std::is_trivially_destructible_v<T_>)
         memset(src, 0, sizeof(T_) * migrate_count);
     }
+
+    template <typename T_>
+    bool equals(const norb::vector<T_> &a, const norb::vector<T_> &b) {
+      if (a.size() != b.size()) return false;
+      for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i] != b[i]) return false;
+      }
+      return true;
+    }
   } // namespace array
 
   // unstructured stuff

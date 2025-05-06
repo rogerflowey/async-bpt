@@ -68,5 +68,5 @@ namespace norb {
     }
   };
 
-  inline std::string FiledConfig::file_path = "./default.config";
+  inline std::string FiledConfig::file_path = "./persistent.config";
 } // namespace norb

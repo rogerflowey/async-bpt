@@ -5,8 +5,8 @@ using norb::hash::hashed_t_;
 
 int main() {
   std::ios::sync_with_stdio(false);
-  std::cin.tie(nullptr);
-  std::cout.tie(nullptr);
+  // std::cin.tie(nullptr);
+  // std::cout.tie(nullptr);
 
   norb::BPlusTree<hashed_t_, int> tree;
 

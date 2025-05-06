@@ -323,6 +323,15 @@ namespace norb {
 
     vector() { base_ptr = raw_new(cur_size_bound); }
     vector(const vector &other) { duplicate_vector(other); }
+    vector(std::initializer_list<T> init) {
+      cur_size = init.size();
+      cur_size_bound = cur_size * 2;
+      base_ptr = raw_new(cur_size_bound);
+      int idx = 0;
+      for (auto &i: init) {
+        new (base_ptr + (idx++)) T(i);
+      }
+    }
 
     ~vector() {
       // Invoke the destructors of corresponding elements stored.
