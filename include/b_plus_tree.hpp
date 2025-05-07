@@ -10,6 +10,7 @@
 namespace norb {
   template <typename idx_t_, typename val_t> class BPlusTree {
   private:
+    using index_storage_t_ = Pair<idx_t_, val_t>;
     using leaf_storage_t_ = Pair<idx_t_, val_t>;
     using MutableHandle = PersistentMemory::MutableHandle;
     template <typename val_t_>
@@ -28,11 +29,14 @@ namespace norb {
 
     struct IndexNode {
       static constexpr size_t aux_var_size = sizeof(size_t) * 2;
-      // static constexpr size_t node_capacity =
-      //     (PAGE_SIZE - aux_var_size) /
-      //         (sizeof(idx_t_) + sizeof(MutableHandle)) -
-      //     1;
+#ifndef USE_SMALL_BATCH
+      static constexpr size_t node_capacity =
+          (PAGE_SIZE - aux_var_size) /
+              (sizeof(index_storage_t_) + sizeof(MutableHandle)) -
+          1;
+#else
       static constexpr size_t node_capacity = OVERWRITE_BLOCK_SIZE;
+#endif
       static constexpr size_t merge_threshold = node_capacity * .25f;
       static constexpr size_t split_threshold = node_capacity * .75f;
       static_assert(PAGE_SIZE - aux_var_size >
@@ -45,7 +49,7 @@ namespace norb {
       /**
        * Now data refers to the smallest element that has been in the child
        */
-      idx_t_ data[node_capacity];
+      index_storage_t_ data[node_capacity];
       MutableHandle children[node_capacity];
       // MutableHandle parent;
     };
@@ -53,9 +57,12 @@ namespace norb {
     struct LeafNode {
       static constexpr size_t aux_var_size =
           sizeof(size_t) + sizeof(MutableHandle);
-      // static constexpr size_t node_capacity =
-      //     (PAGE_SIZE - aux_var_size) / sizeof(leaf_storage_t_);
+#ifndef USE_SMALL_BATCH
+      static constexpr size_t node_capacity =
+          (PAGE_SIZE - aux_var_size) / sizeof(leaf_storage_t_);
+#else
       static constexpr size_t node_capacity = OVERWRITE_BLOCK_SIZE;
+#endif
       static constexpr size_t merge_threshold = node_capacity * .25f;
       static constexpr size_t split_threshold = node_capacity * .75f;
       static_assert(PAGE_SIZE - aux_var_size > sizeof(leaf_storage_t_));
@@ -78,7 +85,26 @@ namespace norb {
       size_t left = 0, right = node.size;
       while (left < right) {
         const size_t mid = (left + right) / 2;
-        if (node.data[mid] >= key)
+        if (node.data[mid].first >= key)
+          right = mid;
+        else
+          left = mid + 1;
+      }
+      return (left > 1) ? (left - 1) : 0;
+    }
+
+    /**
+     * @brief Calculates the node that contains the beginning of key.
+     * @param node Const reference to the index node to check.
+     * @param index The key-val pair to search for.
+     * @return The index to the next node to search in.
+     */
+    static size_t lower_bound(const IndexNode &node,
+                              const index_storage_t_ &index) {
+      size_t left = 0, right = node.size;
+      while (left < right) {
+        const size_t mid = (left + right) / 2;
+        if (node.data[mid] >= index)
           right = mid;
         else
           left = mid + 1;
@@ -95,7 +121,7 @@ namespace norb {
      * node.size.
      */
     static size_t lower_bound(const LeafNode &node, const key_t &key) {
-      size_t left = 0, right = node.size - 1;
+      size_t left = 0, right = node.size;
       while (left < right) {
         const size_t mid = (left + right) / 2;
         if (node.data[mid].first >= key)
@@ -128,12 +154,12 @@ namespace norb {
     }
 
     std::pair<MutableHandle, vector<stack_frame_t_>>
-    stack_descend_to_leaf(const key_t &key) {
+    stack_descend_to_leaf(const index_storage_t_ &index) {
       MutableHandle handle = root_handle.val;
       vector<stack_frame_t_> history;
       for (int i = 0; i < tree_height.val - 1; i++) {
         const auto &index_node_ref = *handle.const_ref<IndexNode>();
-        const auto next_node_idx = lower_bound(index_node_ref, key);
+        const auto next_node_idx = lower_bound(index_node_ref, index);
         history.push_back({handle, next_node_idx});
         handle = index_node_ref.children[next_node_idx];
         assert(!handle.is_nullptr());
@@ -147,27 +173,28 @@ namespace norb {
      * @param target The desired key-val pair.
      * @return pair of the mutable handle to the block and the position within
      * that block.
+     * @note This adjusted version assumes that the descent is precise!
      */
     std::pair<MutableHandle, size_t>
     get_insertion_pos(const MutableHandle &starting_block,
                       const leaf_storage_t_ &target) const {
-      MutableHandle leaf = starting_block;
+      const MutableHandle leaf = starting_block;
       auto leaf_ptr = leaf.const_ref<LeafNode>().as_raw_ptr();
-      MutableHandle last_leaf_handle;
-      size_t last_leaf_size;
-      while (!leaf_ptr->sibling.is_nullptr()) {
-        if (leaf_ptr->data[leaf_ptr->size - 1] >= target)
-          break;
-        last_leaf_handle = leaf;
-        last_leaf_size = leaf_ptr->size;
-        leaf = leaf_ptr->sibling;
-        leaf_ptr = leaf.const_ref<LeafNode>().as_raw_ptr();
-      }
+      // MutableHandle last_leaf_handle;
+      // size_t last_leaf_size;
+      // while (!leaf_ptr->sibling.is_nullptr()) {
+      //   if (leaf_ptr->data[leaf_ptr->size - 1] >= target)
+      //     break;
+      //   last_leaf_handle = leaf;
+      //   last_leaf_size = leaf_ptr->size;
+      //   leaf = leaf_ptr->sibling;
+      //   leaf_ptr = leaf.const_ref<LeafNode>().as_raw_ptr();
+      // }
       const auto insertion_pos = lower_bound(*leaf_ptr, target);
-      if (insertion_pos == 0 && !last_leaf_handle.is_nullptr())
-        return std::make_pair(last_leaf_handle, last_leaf_size);
-      else
-        return std::make_pair(leaf, insertion_pos);
+      // if (insertion_pos == 0 && !last_leaf_handle.is_nullptr())
+      //   return std::make_pair(last_leaf_handle, last_leaf_size);
+      // else
+      return std::make_pair(leaf, insertion_pos);
     }
 
     // Auxiliary functions dealing with overflow and underflow
@@ -195,7 +222,7 @@ namespace norb {
       old_node_href->sibling = new_node_handle;
       // insert into parent
       array::insert_at(parent_node_href->data, parent_node_href->size,
-                       insert_at_pos + 1, new_node_href->data[0].first);
+                       insert_at_pos + 1, new_node_href->data[0]);
       array::insert_at(parent_node_href->children, parent_node_href->size,
                        insert_at_pos + 1, new_node_handle);
       ++parent_node_href->size;
@@ -234,8 +261,7 @@ namespace norb {
       new_root_href->layer = tree_height.val++;
       new_root_href->size = 1;
       if (root_node_is == node_type::leaf)
-        new_root_href->data[0] =
-            root_handle.val.const_ref<LeafNode>()->data[0].first;
+        new_root_href->data[0] = root_handle.val.const_ref<LeafNode>()->data[0];
       else
         new_root_href->data[0] =
             root_handle.val.const_ref<IndexNode>()->data[0];
@@ -328,7 +354,7 @@ namespace norb {
         array::insert_at(old_child_href->data, old_child_href->size++, 0,
                          to_insert);
         // update the parent
-        parent_node_href->data[old_child_at_pos] = to_insert.first;
+        parent_node_href->data[old_child_at_pos] = to_insert;
         return false;
       }
       // A2. borrow from right
@@ -344,7 +370,7 @@ namespace norb {
         old_child_href->data[old_child_href->size++] = to_insert;
         // update the parent
         parent_node_href->data[old_child_at_pos + 1] =
-            right_child_href->data[0].first; // this is the new data
+            right_child_href->data[0]; // this is the new data
         return false;
       }
       // B. merge with sibling if not
@@ -378,7 +404,7 @@ namespace norb {
                          child_to_insert);
         ++old_child_href->size;
         // remove the old data
-        left_child_href->data[left_size - 1].~idx_t_();
+        left_child_href->data[left_size - 1].~index_storage_t_();
         left_child_href->children[left_size - 1].~MutableHandle();
         --left_child_href->size;
         // update parent
@@ -499,7 +525,7 @@ namespace norb {
         ++tree_height.val;
         return;
       }
-      auto [handle, history] = stack_descend_to_leaf(key);
+      auto [handle, history] = stack_descend_to_leaf(norb::make_pair(key, val));
       auto [leaf_node_handle, within_leaf_node_pos] =
           get_insertion_pos(handle, norb::make_pair(key, val));
       auto leaf_node_href = leaf_node_handle.template ref<LeafNode>();
@@ -534,7 +560,7 @@ namespace norb {
     bool remove(const idx_t_ &key, const val_t &val) {
       if (tree_height.val == 0)
         return false;
-      auto [handle, history] = stack_descend_to_leaf(key);
+      auto [handle, history] = stack_descend_to_leaf(norb::make_pair(key, val));
       auto [leaf_node_handle, within_leaf_node_pos] =
           get_insertion_pos(handle, norb::make_pair(key, val));
       if (const auto leaf_node_const_href =
@@ -550,7 +576,8 @@ namespace norb {
                        within_leaf_node_pos);
       int cur = history.size() - 1; // cursor on the history stack
       bool go_on = false;
-      if ((--leaf_node_href->template size) <= LeafNode::merge_threshold && cur >= 0)
+      if ((--leaf_node_href->template size) <= LeafNode::merge_threshold &&
+          cur >= 0)
         go_on = handle_leaf_underflow(history[cur--]);
       if (!go_on)
         return true;
@@ -656,8 +683,10 @@ namespace norb {
               // Enqueue child for the next level
               q.push({node_ref->children[i], node_level + 1});
             }
-            std::cout << "[" << node_ref->data[i] << ", "
-                      << node_ref->data[i + 1] << "] ";
+            std::cout << "[" << node_ref->data[i].first
+                      << node_ref->data[i].second << ", "
+                      << node_ref->data[i + 1].first
+                      << node_ref->data[i + 1].second << ") ";
           }
           std::cout << std::endl;
 
