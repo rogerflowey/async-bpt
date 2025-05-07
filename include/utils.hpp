@@ -148,5 +148,11 @@ namespace norb {
     inline bool ascend(const char *begin, const char *val, const char *end) {
       return strcmp(begin, val) <= 0 && strcmp(val, end) <= 0;
     }
+
+    inline void remove_associated() {
+      std::remove(PMEM_FILE_NAME.c_str());
+      std::remove((PMEM_FILE_NAME + ".config").c_str());
+      std::remove("persistent.config");
+    }
   }; // namespace chore
 } // namespace norb
