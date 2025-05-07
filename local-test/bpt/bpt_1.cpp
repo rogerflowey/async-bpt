@@ -2,6 +2,7 @@
 #include <cassert>
 
 int main() {
+  norb::chore::remove_associated();
   norb::BPlusTree<int, int> bpt;
   bpt.insert(2, 2);
   bpt.traverse();

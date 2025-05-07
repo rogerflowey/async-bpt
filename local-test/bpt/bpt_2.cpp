@@ -4,6 +4,7 @@
 using norb::array::equals;
 
 int main() {
+  norb::chore::remove_associated();
   norb::BPlusTree<char, int> bpt;
   bpt.insert('a', 1);
   bpt.insert('b', 7);
