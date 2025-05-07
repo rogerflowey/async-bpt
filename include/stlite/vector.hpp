@@ -5,10 +5,17 @@
 
 #include <climits>
 #include <cstddef>
-#include <stdexcept>
 #include <cstring>
+#include <ostream>
+#include <stdexcept>
 
 namespace norb {
+  // Forward declarations
+  template <typename T> class vector;
+  template <typename T>
+  std::ostream &operator<<(std::ostream &os, const vector<T> &vec);
+
+  // Implementation
   template <typename T> class vector {
   private:
     static constexpr size_t STARTUP_SIZE = 16;
@@ -520,7 +527,22 @@ namespace norb {
       }
       base_ptr[--cur_size].~T();
     }
+
+    friend std::ostream &operator<< <>(std::ostream &os, const vector<T> &vec);
   };
+
+  template <typename T>
+  std::ostream &operator<<(std::ostream &os, const vector<T> &vec) {
+    os << "[";
+    for (size_t i = 0; i < vec.cur_size; ++i) {
+      os << vec.base_ptr[i];
+      if (i < vec.cur_size - 1) {
+        os << ", ";
+      }
+    }
+    os << "]";
+    return os;
+  }
 
 } // namespace norb
 
