@@ -17,6 +17,7 @@ namespace norb {
     using stack_frame_t_ = std::pair<MutableHandle, size_t>;
     enum node_type { index, leaf };
 
+  public:
     struct IndexNode;
     struct LeafNode;
 
@@ -152,14 +153,21 @@ namespace norb {
                       const leaf_storage_t_ &target) const {
       MutableHandle leaf = starting_block;
       auto leaf_ptr = leaf.const_ref<LeafNode>().as_raw_ptr();
+      MutableHandle last_leaf_handle;
+      size_t last_leaf_size;
       while (!leaf_ptr->sibling.is_nullptr()) {
-        if ((leaf_ptr->template size) < LeafNode::split_threshold ||
-            leaf_ptr->data[leaf_ptr->size - 1] >= target)
+        if (leaf_ptr->data[leaf_ptr->size - 1] >= target)
           break;
+        last_leaf_handle = leaf;
+        last_leaf_size = leaf_ptr->size;
         leaf = leaf_ptr->sibling;
         leaf_ptr = leaf.const_ref<LeafNode>().as_raw_ptr();
       }
-      return std::make_pair(leaf, lower_bound(*leaf_ptr, target));
+      const auto insertion_pos = lower_bound(*leaf_ptr, target);
+      if (insertion_pos == 0 && !last_leaf_handle.is_nullptr())
+        return std::make_pair(last_leaf_handle, last_leaf_size);
+      else
+        return std::make_pair(leaf, insertion_pos);
     }
 
     // Auxiliary functions dealing with overflow and underflow
@@ -567,7 +575,7 @@ namespace norb {
 
       if (root_handle.val.is_nullptr()) {
         std::cout << "[Tree] Empty" << std::endl;
-        std::cout << "--- End Traversal ---" << std::endl;
+        std::cout << "--- End Traversal ---" << std::endl << std::endl;
         return;
       }
 
@@ -669,14 +677,14 @@ namespace norb {
                    "Index overflow violation");
             // Basic check: Ensure children handles are not null (unless error
             // state)
-            for (size_t i = 0; i <= node_ref->size; ++i) {
+            for (size_t i = 0; i < node_ref->size; ++i) {
               assert(!node_ref->children[i].is_nullptr() &&
                      "Index node has null child pointer");
             }
           }
         }
       }
-      std::cout << "--- End Traversal ---" << std::endl;
+      std::cout << "--- End Traversal ---" << std::endl << std::endl;
     }
   };
 } // namespace norb
