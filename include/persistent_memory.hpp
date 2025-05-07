@@ -106,8 +106,10 @@ namespace norb {
       history[slot_id].insert(time_stamp++);
       buffer_page_id[slot_id] = page_id;
       // copy the disk info to the memory
+      assert(fmemory.good());
       fmemory.seekg(page_id * PAGE_SIZE, std::ios::beg);
       filesystem::binary_read(fmemory, buffer[slot_id]);
+      assert(fmemory.good());
     }
 
     /**
@@ -167,13 +169,20 @@ namespace norb {
 
     public:
       explicit HandledReference(const page_id_t &page_id) : page_id(page_id) {
+        if (page_id > get_instance().current_pages_in_disk) {
+          if (page_id == static_cast<page_id_t>(-1))
+            throw std::invalid_argument("Nullptr cannot be dereferenced");
+          else
+            throw std::invalid_argument("Page ID out of range");
+        }
         allocate_page_and_update_slot();
       }
 
       ~HandledReference() { --get_instance().lock_count[slot_id]; }
 
       explicit HandledReference(const HandledReference<page_id_t> &) = delete;
-      HandledReference<page_id_t> &operator=(const HandledReference<page_id_t> &) = delete;
+      HandledReference<page_id_t> &
+      operator=(const HandledReference<page_id_t> &) = delete;
       HandledReference(HandledReference &&) = delete;
 
       T *operator->() const {
@@ -227,13 +236,21 @@ namespace norb {
     public:
       explicit ConstHandledReference(const page_id_t &page_id)
           : page_id(page_id) {
+        if (page_id > get_instance().current_pages_in_disk) {
+          if (page_id == static_cast<page_id_t>(-1))
+            throw std::invalid_argument("Nullptr cannot be dereferenced");
+          else
+            throw std::invalid_argument("Page ID out of range");
+        }
         allocate_page_and_update_slot();
       }
 
       ~ConstHandledReference() { --get_instance().lock_count[slot_id]; }
 
-      explicit ConstHandledReference(const ConstHandledReference<page_id_t> &) = delete;
-      ConstHandledReference<page_id_t> &operator = (const ConstHandledReference<page_id_t> &) = delete;
+      explicit ConstHandledReference(const ConstHandledReference<page_id_t> &) =
+          delete;
+      ConstHandledReference<page_id_t> &
+      operator=(const ConstHandledReference<page_id_t> &) = delete;
       ConstHandledReference(ConstHandledReference &&) = delete;
 
       const T *operator->() const {
@@ -262,7 +279,7 @@ namespace norb {
       // create the file if it does not exist
       filesystem::fassert(path);
       filesystem::fassert(path + ".config");
-      fconfig.open(path, std::ios::in | std::ios::out | std::ios::binary);
+      fconfig.open(path + ".config", std::ios::in | std::ios::out | std::ios::binary);
       // if the config file is not empty, read the contents
       if (!filesystem::is_empty(fconfig)) {
         // get the config contents
