@@ -532,7 +532,8 @@ namespace norb {
       if (const auto leaf_node_const_href =
               leaf_node_handle.template const_ref<LeafNode>();
           leaf_node_const_href->size <= within_leaf_node_pos ||
-          leaf_node_const_href->data[within_leaf_node_pos].second != key)
+          leaf_node_const_href->data[within_leaf_node_pos].first != key ||
+          leaf_node_const_href->data[within_leaf_node_pos].second != val)
         return false;
       // the value exists and the pair should be removed
       --tree_size.val;
@@ -540,8 +541,8 @@ namespace norb {
       array::remove_at(leaf_node_href->data, leaf_node_href->size,
                        within_leaf_node_pos);
       int cur = history.size() - 1; // cursor on the history stack
-      bool go_on = true;
-      if ((--leaf_node_href->template size) <= LeafNode::merge_threshold)
+      bool go_on = false;
+      if ((--leaf_node_href->template size) <= LeafNode::merge_threshold && cur >= 0)
         go_on = handle_leaf_underflow(history[cur--]);
       if (!go_on)
         return true;
