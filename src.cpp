@@ -1,12 +1,12 @@
 #include "b_plus_tree.hpp"
 
-using norb::hash::fnv1a_hash;
+const auto hash_method = norb::hash::fnv1a_hash;
 using norb::hash::hashed_t_;
 
 int main() {
   std::ios::sync_with_stdio(false);
-  // std::cin.tie(nullptr);
-  // std::cout.tie(nullptr);
+  std::cin.tie(nullptr);
+  std::cout.tie(nullptr);
 
   norb::BPlusTree<hashed_t_, int> tree;
 
@@ -16,7 +16,7 @@ int main() {
     std::string mode, index;
     int value;
     std::cin >> mode >> index;
-    const auto hashed_index = fnv1a_hash(index);
+    const auto hashed_index = hash_method(index);
     if (mode == "insert") {
       std::cin >> value;
       tree.insert(hashed_index, value);

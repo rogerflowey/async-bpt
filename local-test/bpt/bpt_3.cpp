@@ -4,6 +4,7 @@
 constexpr char PHASE = 'a';
 using norb::array::equals;
 using bpt_type = norb::BPlusTree<char, int>;
+using norb::PersistentMemory;
 
 void phase_a(bpt_type &bpt) {
   assert(bpt.size() == 0);
@@ -12,8 +13,7 @@ void phase_a(bpt_type &bpt) {
   bpt.insert('a', 2);
   bpt.insert('a', 3);
   bpt.insert('a', 1);
-  const auto handle =
-      norb::PersistentMemory::fetch_handle<bpt_type::LeafNode>(0);
+  const auto handle = PersistentMemory::fetch_handle<bpt_type::LeafNode>(0);
   bpt.insert('a', 5);
   bpt.insert('b', 1);
   bpt.insert('b', 4);
@@ -54,6 +54,13 @@ void phase_a(bpt_type &bpt) {
   bpt.traverse(true);
   assert(bpt.remove('a', 1) == true);
   bpt.traverse();
+
+  bpt.insert('a', 0);
+  bpt.traverse();
+  bpt.insert('a', -1);
+  bpt.traverse();
+  bpt.remove('b', 1);
+  bpt.traverse(true);
 }
 
 void phase_b(bpt_type &bpt) {

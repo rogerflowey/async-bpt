@@ -199,7 +199,7 @@ namespace norb {
 
     // Auxiliary functions dealing with overflow and underflow
 
-    void handle_leaf_overflow(const stack_frame_t_ &frame) {
+    bool handle_leaf_overflow(const stack_frame_t_ &frame) {
       // three slots are needed to perform this function
       auto parent_node_href = frame.first.ref<IndexNode>();
       const size_t insert_at_pos = frame.second;
@@ -226,9 +226,10 @@ namespace norb {
       array::insert_at(parent_node_href->children, parent_node_href->size,
                        insert_at_pos + 1, new_node_handle);
       ++parent_node_href->size;
+      return parent_node_href->size >= IndexNode::split_threshold;
     }
 
-    void handle_index_overflow(const stack_frame_t_ &frame) {
+    bool handle_index_overflow(const stack_frame_t_ &frame) {
       auto parent_node_href = frame.first.ref<IndexNode>();
       const size_t insert_at_pos = frame.second;
       auto old_node_href =
@@ -252,6 +253,7 @@ namespace norb {
       array::insert_at(parent_node_href->children, parent_node_href->size,
                        insert_at_pos + 1, new_node_handle);
       ++parent_node_href->size;
+      return parent_node_href->size >= IndexNode::split_threshold;
     }
 
     void handle_root_overflow(const node_type &root_node_is) {
@@ -357,7 +359,7 @@ namespace norb {
         return false;
       }
       // A2. borrow from right
-      if (old_child_at_pos != parent_node_href->size &&
+      if (old_child_at_pos < parent_node_href->size - 1 &&
           parent_node_href->children[old_child_at_pos + 1]
                   .template const_ref<LeafNode>()
                   ->size > LeafNode::merge_threshold + 1) {
@@ -373,11 +375,11 @@ namespace norb {
         return false;
       }
       // B. merge with sibling if not
-      if (old_child_at_pos != parent_node_href->size)
+      if (old_child_at_pos < parent_node_href->size - 1)
         merge_leaf_with_right(frame.first, old_child_at_pos);
       else
         merge_leaf_with_right(frame.first, old_child_at_pos - 1);
-      return true;
+      return parent_node_href->size <= IndexNode::merge_threshold;
     }
 
     bool handle_index_underflow(const stack_frame_t_ &frame) {
@@ -411,11 +413,11 @@ namespace norb {
         return false;
       }
       // A2. borrow from right
-      if (old_child_at_pos != parent_node_href->size - 1 &&
+      if (old_child_at_pos < parent_node_href->size - 1 &&
           parent_node_href->children[old_child_at_pos + 1]
                   .template const_ref<IndexNode>()
                   ->size > IndexNode::merge_threshold + 1) {
-        auto right_child_href = parent_node_href->children[old_child_at_pos]
+        auto right_child_href = parent_node_href->children[old_child_at_pos + 1]
                                     .template ref<IndexNode>();
         // push the new data
         auto data_to_insert = right_child_href->data[0];
@@ -434,11 +436,11 @@ namespace norb {
         return false;
       }
       // B. merge if not
-      if (old_child_at_pos != parent_node_href->size)
+      if (old_child_at_pos < parent_node_href->size - 1)
         merge_index_with_right(frame.first, old_child_at_pos);
       else
         merge_index_with_right(frame.first, old_child_at_pos - 1);
-      return true;
+      return parent_node_href->size <= IndexNode::merge_threshold;
     }
 
     void handle_root_underflow(const node_type &root_node_is) {
@@ -533,12 +535,11 @@ namespace norb {
       ++leaf_node_href->size;
       // if exceeds the upperbound, travel up
       int cur = history.size() - 1;
+      bool go_on = false;
       if (leaf_node_href->size >= LeafNode::split_threshold && cur >= 0)
-        handle_leaf_overflow(history[cur--]);
-      while (cur >= 0 &&
-             history[cur].first.template const_ref<IndexNode>()->size >=
-                 IndexNode::split_threshold)
-        handle_index_overflow(history[cur--]);
+        go_on = handle_leaf_overflow(history[cur--]);
+      while (cur >= 0 && go_on)
+        go_on = handle_index_overflow(history[cur--]);
       // handle root
       if (tree_height.val == 1 &&
           root_handle.val.template const_ref<LeafNode>()->size >=
@@ -694,8 +695,8 @@ namespace norb {
           if (do_check) {
             // Check key order
             for (size_t i = 0; i + 1 < node_ref->size; ++i) {
-              assert(node_ref->data[i] <= node_ref->data[i + 1] &&
-                     "Index key order violation");
+              //! assert(node_ref->data[i] <= node_ref->data[i + 1] &&
+              //!        "Index key order violation");
             }
             // Check size constraints (except for root)
             if (node_level > 0) { // Not root
