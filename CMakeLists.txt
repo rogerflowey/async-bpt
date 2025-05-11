@@ -10,6 +10,7 @@ add_executable(code src.cpp)
 
 # Unit Tests
 enable_testing()
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0")
 include(CTest)
 set(TEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/local-test)
 file(GLOB_RECURSE TEST_SOURCE_FILES "${TEST_DIR}/*.cpp")

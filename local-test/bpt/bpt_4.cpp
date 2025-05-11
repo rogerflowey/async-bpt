@@ -12,13 +12,15 @@
 // --- Configuration ---
 // Set to true to call norb_map.traverse() when an error is detected.
 // Requires norb::BPlusTree to have a public void traverse() method.
+#define NDEBUG
+constexpr bool PRINT_ACTION = false;
 constexpr bool DEBUG_TRAVERSE_ON_ERROR = true;
+constexpr bool ALWAYS_TRAVERSE = false;
 // --- End Configuration ---
-constexpr bool ALWAYS_TRAVERSE = true;
 
 int num_operations =
-    2000; // Default number of operations, can be overridden by CLI
-constexpr int random_seed = 7;
+    100000; // Default number of operations, can be overridden by CLI
+constexpr int random_seed = 600;
 constexpr int debug_point = -1;
 
 // Helper to convert norb::vector to std::vector for easier comparison
@@ -80,21 +82,23 @@ int main(int argc, char *argv[]) {
   std::uniform_int_distribution<> op_dist(
       0, 2); // 0: insert, 1: remove, 2: find_all
   std::uniform_int_distribution<char> key_dist(
-      'a', 'e'); // Smaller key range for more collisions
-  std::uniform_int_distribution<int> val_dist(0, 9); // Smaller value range
+      'A', 'z'); // Smaller key range for more collisions
+  std::uniform_int_distribution<int> val_dist(0, 1000000); // Smaller value range
 
   std::vector<std::pair<char, int>> existing_pairs; // For targeted removal
 
   for (int i = 0; i < num_operations; ++i) {
-    // Progress indicator
-    if (num_operations >= 100) {
-      if (i % (num_operations / 100) == 0) {
+    if (PRINT_ACTION) {
+      // Progress indicator
+      if (num_operations >= 100) {
+        if (i % (num_operations / 100) == 0) {
+          std::cout << "\rProgress: " << (100 * i / num_operations) << "%\n"
+                    << std::flush;
+        }
+      } else if (i % 10 == 0) { // Print more frequently for small N
         std::cout << "\rProgress: " << (100 * i / num_operations) << "%\n"
                   << std::flush;
       }
-    } else if (i % 10 == 0) { // Print more frequently for small N
-      std::cout << "\rProgress: " << (100 * i / num_operations) << "%\n"
-                << std::flush;
     }
 
     int operation_type = op_dist(gen);
@@ -116,8 +120,10 @@ int main(int argc, char *argv[]) {
     }
 
     if (operation_type == 0) { // INSERT
-      std::cout << "[" << i << "] Operation: INSERT (" << current_key << ", "
-                << current_value << ")" << std::endl;
+      if (PRINT_ACTION) {
+        std::cout << "[" << i << "] Operation: INSERT (" << current_key << ", "
+                  << current_value << ")" << std::endl;
+      }
       norb_map.insert(current_key, current_value);
       map.insert({current_key, current_value});
       existing_pairs.push_back({current_key, current_value});
@@ -136,15 +142,20 @@ int main(int argc, char *argv[]) {
         int idx_in_existing = existing_idx_dist(gen);
         key_to_remove = existing_pairs[idx_in_existing].first;
         value_to_remove = existing_pairs[idx_in_existing].second;
-        std::cout << "[" << i << "] Operation: REMOVE existing ("
-                  << key_to_remove << ", " << value_to_remove << ")"
-                  << std::endl;
+        if (PRINT_ACTION) {
+          std::cout << "[" << i << "] Operation: REMOVE existing ("
+                    << key_to_remove << ", " << value_to_remove << ")"
+                    << std::endl;
+        }
       } else {
         key_to_remove =
             current_key; // Try to remove a random (possibly non-existent) pair
         value_to_remove = current_value;
-        std::cout << "[" << i << "] Operation: REMOVE random (" << key_to_remove
-                  << ", " << value_to_remove << ")" << std::endl;
+        if (PRINT_ACTION) {
+          std::cout << "[" << i << "] Operation: REMOVE random ("
+                    << key_to_remove << ", " << value_to_remove << ")"
+                    << std::endl;
+        }
       }
 
       bool norb_removed = norb_map.remove(key_to_remove, value_to_remove);
@@ -187,8 +198,10 @@ int main(int argc, char *argv[]) {
       }
 
     } else { // FIND_ALL (operation_type == 2)
-      std::cout << "[" << i << "] Operation: FIND_ALL ('" << current_key << "')"
-                << std::endl;
+      if (PRINT_ACTION) {
+        std::cout << "[" << i << "] Operation: FIND_ALL ('" << current_key
+                  << "')" << std::endl;
+      }
       norb::vector<int> norb_results_norb_vec = norb_map.find_all(current_key);
       std::vector<int> norb_results_std_vec =
           to_std_vector(norb_results_norb_vec);
