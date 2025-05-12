@@ -424,350 +424,35 @@ posix_read_verify_failed:;
     free(buffer);
     remove(filename.c_str());
 }
-#include <liburing.h>   // Include liburing header
-#include <sys/uio.h>    // For struct iovec
-#include <fcntl.h>      // For open flags
-#include <unistd.h>     // For close
-#include <errno.h>      // For errno
-#include <map>          // For tracking active requests by user_data
-#include <vector>
-#include <numeric>
-#include <random>
-#include <algorithm>
-#include <iostream>
-#include <chrono>
-#include <cassert>
-#include <cstring>      // For strerror, memset
-#include <utils.hpp>    // For norb::vector (assuming it's needed for external_buffers type)
 
 
-// Structure to hold info about a pending raw io_uring request
-struct RawIOInfo {
-    off_t offset;
-    int buffer_id;
-    char pattern; // Pattern written or expected
-    bool is_write;
-    size_t op_index; // Original index in the main loop (before shuffling)
-};
+// In your main function, replace the call to run_fstream_benchmark:
+// run_fstream_benchmark(fstream_filename, num_fstream_ops, BUFFER_SIZE);
+// with:
+// run_posix_direct_io_benchmark(fstream_filename, num_fstream_ops, BUFFER_SIZE);
 
-// Function to run a benchmark using raw liburing calls
-void run_raw_iouring_benchmark(const std::string& filename, size_t num_ops, size_t buffer_size, int queue_depth, const norb::vector<void*>& external_buffers) {
-    std::cout << "\n--- Running Raw io_uring Benchmark (Random Access) ---" << std::endl;
-    std::cout << "File: " << filename << ", Ops: " << num_ops << ", Buffer Size: " << buffer_size << ", QD: " << queue_depth << std::endl;
-
-    const int num_buffers = external_buffers.size();
-    if (num_buffers == 0) { /* ... error handling ... */ return; }
-
-    // --- io_uring Setup ---
-    struct io_uring ring;
-    int ret = io_uring_queue_init(queue_depth, &ring, 0);
-    if (ret < 0) { /* ... error handling ... */ return; }
-
-    // --- File Setup ---
-    int fd = open(filename.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
-    if (fd < 0) { /* ... error handling ... */ io_uring_queue_exit(&ring); return; }
-
-    // Register File
-    int files_fd[1] = {fd};
-    ret = io_uring_register_files(&ring, files_fd, 1);
-    if (ret < 0) { /* ... error handling ... */ close(fd); io_uring_queue_exit(&ring); return; }
-    const int file_index = 0;
-
-    // Register Buffers
-    std::vector<struct iovec> iovs(num_buffers);
-    for (int i = 0; i < num_buffers; ++i) {
-        iovs[i].iov_base = external_buffers[i];
-        iovs[i].iov_len = buffer_size;
-    }
-    ret = io_uring_register_buffers(&ring, iovs.data(), num_buffers);
-    if (ret < 0) { /* ... error handling ... */ io_uring_unregister_files(&ring); close(fd); io_uring_queue_exit(&ring); return; }
-    std::cout << "Raw bench: io_uring setup complete." << std::endl;
-
-    // --- Generate and Shuffle Block Indices ---
-    std::vector<size_t> block_indices(num_ops);
-    std::iota(block_indices.begin(), block_indices.end(), 0);
-    std::random_device rd;
-    std::mt19937 g(rd());
-    std::shuffle(block_indices.begin(), block_indices.end(), g);
-    std::cout << "Raw bench: Generated and shuffled " << num_ops << " block indices." << std::endl;
-
-    // --- State Management ---
-    std::vector<bool> buffer_is_busy(num_buffers, false);
-    std::vector<RawIOInfo> io_info_pool(queue_depth);
-    std::vector<bool> io_info_slot_busy(queue_depth, false);
-    // No need for active_requests vector if we use the pool directly
-
-    bool success = true;
-    auto overall_start_time = std::chrono::high_resolution_clock::now();
-
-    // --- Write Phase (Random Access) ---
-    auto write_start_time = std::chrono::high_resolution_clock::now();
-    size_t submitted_write_count = 0;
-    size_t completed_write_count = 0;
-    size_t active_io_count = 0;
-
-    while (completed_write_count < num_ops) {
-        // Declare variables needed in this loop iteration scope
-        int submitted_now = 0;
-        unsigned completions_reaped_this_iter = 0; // Renamed for clarity
-        struct io_uring_cqe *cqe = nullptr;
-        unsigned head;
-
-        // 1. Submit new requests if possible
-        while (active_io_count < (size_t)queue_depth && submitted_write_count < num_ops) {
-            int free_buffer_id = -1; for (int k = 0; k < num_buffers; ++k) if (!buffer_is_busy[k]) { free_buffer_id = k; break; }
-            if (free_buffer_id == -1) break;
-            int free_info_slot = -1; for (int k = 0; k < queue_depth; ++k) if (!io_info_slot_busy[k]) { free_info_slot = k; break; }
-            if (free_info_slot == -1) break;
-            struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-            if (!sqe) break;
-
-            size_t op_idx = submitted_write_count;
-            size_t block_idx = block_indices[op_idx];
-            RawIOInfo* current_io_info = &io_info_pool[free_info_slot];
-            current_io_info->offset = (off_t)block_idx * buffer_size;
-            current_io_info->buffer_id = free_buffer_id;
-            current_io_info->pattern = 'R' + (block_idx % 26);
-            current_io_info->is_write = true;
-            current_io_info->op_index = op_idx;
-
-            memset(external_buffers[free_buffer_id], current_io_info->pattern, buffer_size);
-            io_uring_prep_write_fixed(sqe, file_index, external_buffers[free_buffer_id], buffer_size, current_io_info->offset, free_buffer_id);
-            sqe->flags |= IOSQE_FIXED_FILE;
-            io_uring_sqe_set_data(sqe, current_io_info);
-
-            buffer_is_busy[free_buffer_id] = true;
-            io_info_slot_busy[free_info_slot] = true;
-            active_io_count++;
-            submitted_write_count++;
-        }
-
-        // 2. Submit prepared requests (if any)
-        if (io_uring_sq_ready(&ring) > 0) {
-             ret = io_uring_submit(&ring);
-             if (ret < 0) { /* ... handle submit error ... */ success = false; goto raw_write_failed; }
-             submitted_now = ret;
-        }
-
-        // 3. Reap completions
-        // Peek first, then wait if nothing submitted and nothing ready
-        bool need_to_wait = (submitted_now == 0 && io_uring_cq_ready(&ring) == 0 && completed_write_count < num_ops);
-
-        if (need_to_wait && active_io_count > 0) { // Only wait if ops are outstanding
-             ret = io_uring_wait_cqe(&ring, &cqe); // cqe declared above
-             if (ret < 0) { /* ... handle wait error ... */ success = false; goto raw_write_failed; }
-
-             RawIOInfo* req_info = reinterpret_cast<RawIOInfo*>(io_uring_cqe_get_data(cqe));
-             if (req_info) {
-                 if (cqe->res < 0) { /* ... handle CQE error ... */ success = false; }
-                 else if ((size_t)cqe->res != buffer_size) { /* ... handle wrong size ... */ success = false; }
-                 buffer_is_busy[req_info->buffer_id] = false;
-                 int slot_idx = req_info - io_info_pool.data();
-                 if (slot_idx >= 0 && slot_idx < queue_depth) io_info_slot_busy[slot_idx] = false;
-                 else { /* ... handle slot error ... */ }
-                 active_io_count--;
-                 completed_write_count++;
-                 completions_reaped_this_iter++;
-             } else { /* ... handle NULL user_data ... */ }
-             io_uring_cqe_seen(&ring, cqe); // Mark this single CQE as seen
-
-        } else if (!need_to_wait) { // Process batch if we didn't wait or if wait wasn't needed
-             io_uring_for_each_cqe(&ring, head, cqe) { // cqe declared above
-                 RawIOInfo* req_info = reinterpret_cast<RawIOInfo*>(io_uring_cqe_get_data(cqe));
-                 if (!req_info) { /* ... handle NULL user_data ... */ continue; }
-                 if (cqe->res < 0) { /* ... handle CQE error ... */ success = false; }
-                 else if ((size_t)cqe->res != buffer_size) { /* ... handle wrong size ... */ success = false; }
-                 buffer_is_busy[req_info->buffer_id] = false;
-                 int slot_idx = req_info - io_info_pool.data();
-                 if (slot_idx >= 0 && slot_idx < queue_depth) io_info_slot_busy[slot_idx] = false;
-                 else { /* ... handle slot error ... */ }
-                 active_io_count--;
-                 completed_write_count++;
-                 completions_reaped_this_iter++;
-             }
-             if (completions_reaped_this_iter > 0) {
-                 io_uring_cq_advance(&ring, completions_reaped_this_iter);
-             }
-        } // End if/else for reaping
-
-        if (!success && completed_write_count > 0) { /* ... break early on error ... */ break; }
-
-    } // End write phase main loop
-
-raw_write_failed:;
-    auto write_end_time = std::chrono::high_resolution_clock::now();
-    auto write_duration = std::chrono::duration_cast<std::chrono::milliseconds>(write_end_time - write_start_time);
-    if (!success) { /* ... error handling ... */ io_uring_unregister_buffers(&ring); io_uring_unregister_files(&ring); close(fd); io_uring_queue_exit(&ring); return; }
-    std::cout << "Raw bench: Write Phase completed in " << write_duration.count() << " ms." << std::endl;
-    assert(active_io_count == 0 && "Active IO count not zero after write phase");
-
-
-    // --- Read and Verify Phase (Random Access) ---
-    auto read_start_time = std::chrono::high_resolution_clock::now();
-    size_t submitted_read_count = 0;
-    size_t completed_read_count = 0;
-    active_io_count = 0;
-    std::fill(io_info_slot_busy.begin(), io_info_slot_busy.end(), false);
-    // active_requests vector not needed
-
-    while (completed_read_count < num_ops) {
-        // Declare variables needed in this loop iteration scope
-        int submitted_now = 0;
-        unsigned completions_reaped_this_iter = 0; // Renamed for clarity
-        struct io_uring_cqe *cqe = nullptr;
-        unsigned head;
-
-        // 1. Submit reads
-         while (active_io_count < (size_t)queue_depth && submitted_read_count < num_ops) {
-            int free_buffer_id = -1; for (int k = 0; k < num_buffers; ++k) if (!buffer_is_busy[k]) { free_buffer_id = k; break; }
-            if (free_buffer_id == -1) break;
-            int free_info_slot = -1; for (int k = 0; k < queue_depth; ++k) if (!io_info_slot_busy[k]) { free_info_slot = k; break; }
-            if (free_info_slot == -1) break;
-            struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-            if (!sqe) break;
-
-            size_t op_idx = submitted_read_count;
-            size_t block_idx = block_indices[op_idx];
-            RawIOInfo* current_io_info = &io_info_pool[free_info_slot];
-            current_io_info->offset = (off_t)block_idx * buffer_size;
-            current_io_info->buffer_id = free_buffer_id;
-            current_io_info->pattern = 'R' + (block_idx % 26);
-            current_io_info->is_write = false;
-            current_io_info->op_index = op_idx;
-
-            memset(external_buffers[free_buffer_id], 0, buffer_size);
-            io_uring_prep_read_fixed(sqe, file_index, external_buffers[free_buffer_id], buffer_size, current_io_info->offset, free_buffer_id);
-            sqe->flags |= IOSQE_FIXED_FILE;
-            io_uring_sqe_set_data(sqe, current_io_info);
-
-            buffer_is_busy[free_buffer_id] = true;
-            io_info_slot_busy[free_info_slot] = true;
-            active_io_count++;
-            submitted_read_count++;
-        }
-
-        // 2. Submit
-        if (io_uring_sq_ready(&ring) > 0) {
-             ret = io_uring_submit(&ring);
-             if (ret < 0) { /* ... handle submit error ... */ success = false; goto raw_read_failed; }
-             submitted_now = ret;
-        }
-
-        // 3. Reap & Verify
-        bool need_to_wait = (submitted_now == 0 && io_uring_cq_ready(&ring) == 0 && completed_read_count < num_ops);
-
-        if (need_to_wait && active_io_count > 0) { // Only wait if ops are outstanding
-             ret = io_uring_wait_cqe(&ring, &cqe); // cqe declared above
-             if (ret < 0) { /* ... handle wait error ... */ success = false; goto raw_read_failed; }
-
-             RawIOInfo* req_info = reinterpret_cast<RawIOInfo*>(io_uring_cqe_get_data(cqe));
-             if (req_info) {
-                 if (cqe->res < 0) { /* ... handle CQE error ... */ success = false; }
-                 else if ((size_t)cqe->res != buffer_size) { /* ... handle wrong size ... */ success = false; }
-                 else {
-                     // Verification
-                     char* buf_ptr = static_cast<char*>(external_buffers[req_info->buffer_id]);
-                     for (size_t j = 0; j < buffer_size; ++j) {
-                         if (buf_ptr[j] != req_info->pattern) {
-                             std::cerr << "Raw bench: Verify failed block_idx " << block_indices[req_info->op_index]
-                                       << " offset " << req_info->offset << " index " << j
-                                       << "! Expected '" << req_info->pattern << "', got '" << buf_ptr[j] << "'" << std::endl;
-                             success = false;
-                         }
-                     }
-                 }
-                 buffer_is_busy[req_info->buffer_id] = false;
-                 int slot_idx = req_info - io_info_pool.data();
-                 if (slot_idx >= 0 && slot_idx < queue_depth) io_info_slot_busy[slot_idx] = false;
-                 else { /* ... handle slot error ... */ }
-                 active_io_count--;
-                 completed_read_count++;
-                 completions_reaped_this_iter++;
-             } else { /* ... handle NULL user_data ... */ }
-             io_uring_cqe_seen(&ring, cqe); // Mark this single CQE as seen
-
-        } else if (!need_to_wait) { // Process batch if we didn't wait or if wait wasn't needed
-             io_uring_for_each_cqe(&ring, head, cqe) { // cqe declared above
-                 RawIOInfo* req_info = reinterpret_cast<RawIOInfo*>(io_uring_cqe_get_data(cqe));
-                 if (!req_info) { /* ... handle NULL user_data ... */ continue; }
-                 if (cqe->res < 0) { /* ... handle CQE error ... */ success = false; }
-                 else if ((size_t)cqe->res != buffer_size) { /* ... handle wrong size ... */ success = false; }
-                 else {
-                     // Verification
-                     char* buf_ptr = static_cast<char*>(external_buffers[req_info->buffer_id]);
-                     for (size_t j = 0; j < buffer_size; ++j) {
-                         if (buf_ptr[j] != req_info->pattern) {
-                             std::cerr << "Raw bench: Verify failed block_idx " << block_indices[req_info->op_index]
-                                       << " offset " << req_info->offset << " index " << j
-                                       << "! Expected '" << req_info->pattern << "', got '" << buf_ptr[j] << "'" << std::endl;
-                             success = false;
-                         }
-                     }
-                 }
-                 buffer_is_busy[req_info->buffer_id] = false;
-                 int slot_idx = req_info - io_info_pool.data();
-                 if (slot_idx >= 0 && slot_idx < queue_depth) io_info_slot_busy[slot_idx] = false;
-                 else { /* ... handle slot error ... */ }
-                 active_io_count--;
-                 completed_read_count++;
-                 completions_reaped_this_iter++;
-             }
-             if (completions_reaped_this_iter > 0) {
-                 io_uring_cq_advance(&ring, completions_reaped_this_iter);
-             }
-        } // End if/else for reaping
-
-        if (!success && completed_read_count > 0) { /* ... break early on error ... */ break; }
-
-    } // End read phase main loop
-
-raw_read_failed:;
-    auto read_end_time = std::chrono::high_resolution_clock::now();
-    auto read_duration = std::chrono::duration_cast<std::chrono::milliseconds>(read_end_time - read_start_time);
-    if (!success) { std::cerr << "Raw bench: Read/Verify phase failed." << std::endl; }
-    else { std::cout << "Raw bench: Read/Verify Phase completed in " << read_duration.count() << " ms." << std::endl; }
-    assert(active_io_count == 0 && "Active IO count not zero after read phase");
-
-    // --- Calculate Stats ---
-    auto overall_end_time = std::chrono::high_resolution_clock::now();
-    auto overall_duration = std::chrono::duration_cast<std::chrono::milliseconds>(overall_end_time - overall_start_time);
-    double total_data_gb = 2.0 * num_ops * buffer_size / (1024.0 * 1024.0 * 1024.0);
-    double duration_sec = overall_duration.count() / 1000.0;
-    double throughput_mibps = (duration_sec > 0) ? (total_data_gb * 1024.0) / duration_sec : 0;
-    double iops = (duration_sec > 0) ? (2.0 * num_ops) / duration_sec : 0;
-
-    std::cout << "--- Raw io_uring Benchmark Complete ---" << std::endl;
-    std::cout << "    Result: " << (success ? "Passed" : "FAILED") << std::endl;
-    std::cout << "    Total Duration (W+R): " << overall_duration.count() << " ms" << std::endl;
-    std::cout << "    Total Ops (W+R): " << 2 * num_ops << std::endl;
-    std::cout << "    Total Data (W+R): " << total_data_gb << " GiB" << std::endl;
-    std::cout << "    Approx Throughput: " << throughput_mibps << " MiB/s" << std::endl;
-    std::cout << "    Approx IOPS: " << iops << std::endl;
-    std::cout << "-------------------------------------" << std::endl;
-
-    // --- Cleanup ---
-    io_uring_unregister_buffers(&ring);
-    io_uring_unregister_files(&ring);
-    close(fd);
-    io_uring_queue_exit(&ring);
-    remove(filename.c_str()); // Remove benchmark file
-}
 int main() {
-    // Use a base filename in the WSL home directory
-    const std::string base_filename = "/home/rogerw/benchmark_test_";
-    std::cout << "Using base filename: " << base_filename << std::endl;
+    std::string test_filename = TEST_FILENAME_BASE + std::to_string(getpid()) + ".dat";
+    std::cout << "Using test file: " << test_filename << std::endl;
     std::cout << "Buffer Size: " << BUFFER_SIZE
               << ", Num Buffers: " << NUM_BUFFERS
               << ", Queue Depth: " << QUEUE_DEPTH
-              << ", Batch Submit Size: " << BATCH_SUBMIT_SIZE // Relevant for DiskScheduler test if run
-              << ", Simulated Work Between Submissions: " << SIMULATED_WORK_US << " us" // Relevant for DiskScheduler test if run
+              << ", Batch Submit Size: " << BATCH_SUBMIT_SIZE
+              << ", Simulated Work Between Submissions: " << SIMULATED_WORK_US << " us" // Note if this is 0
               << std::endl;
 
-    norb::vector<void*> buffers; // Buffers needed for raw io_uring test too
-    DiskScheduler* scheduler = nullptr; // Keep variable, but might not initialize
+    norb::vector<void*> buffers;
+    DiskScheduler* scheduler = nullptr;
 
-    // Define op count for benchmarks (can be adjusted)
-    const int num_benchmark_ops = QUEUE_DEPTH * 1000;
+    off_t current_offset = 0;
+    const off_t phase_offset_increment = (off_t)(QUEUE_DEPTH * 25) * BUFFER_SIZE;
+
+    // --- Discussion Point: Keeping the Disk Busy ---
+    // (Note remains relevant, especially if SIMULATED_WORK_US > 0)
+    std::cout << "\n--- Note on Disk Saturation ---" << std::endl;
+    // ... (rest of note) ...
+    std::cout << "--- End Note ---" << std::endl;
+
 
     try {
         std::cout << "Allocating " << NUM_BUFFERS << " aligned buffers (Size: " << BUFFER_SIZE << ", Alignment: " << BUFFER_SIZE <<")..." << std::endl;
@@ -776,67 +461,349 @@ int main() {
         }
         std::cout << "Buffers allocated." << std::endl;
 
-        // --- Original DiskScheduler Tests (Skipped/Commented Out) ---
-        /*
         std::cout << "Initializing DiskScheduler..." << std::endl;
-        int open_flags = O_RDWR | O_CREAT | O_TRUNC;
-        #ifdef __linux__
-            open_flags |= O_DIRECT;
-            std::cout << "Using O_DIRECT flag." << std::endl;
-        #else
-            std::cout << "O_DIRECT flag not available or not used on this OS." << std::endl;
-        #endif
-        std::string test_filename = base_filename + "diskscheduler_" + std::to_string(getpid()) + ".dat";
-        scheduler = new DiskScheduler(test_filename, QUEUE_DEPTH, open_flags, BATCH_SUBMIT_SIZE);
+
+        scheduler = new DiskScheduler(test_filename, QUEUE_DEPTH, 0, BATCH_SUBMIT_SIZE);
         std::cout << "DiskScheduler initialized." << std::endl;
 
         std::cout << "Registering buffers..." << std::endl;
         scheduler->register_buffers(buffers);
         std::cout << "Buffers registered." << std::endl;
 
-        // --- Test Phase 1 --- (Skipped)
-        // --- Test Phase 2 --- (Skipped)
-        // --- Test Phase 3 --- (Skipped)
-        // --- Test Phase 4 --- (Skipped)
+        // --- Test Phase 1: Basic Batched Writes & Reads ---
+        // (Sequential, SIMULATED_WORK_US applies if > 0)
+        {
+            std::cout << "\n--- Test Phase 1: Basic Batched Writes & Reads ---" << std::endl;
+            std::vector<wutong::Task<bool>> tasks;
+            const int num_ops_phase1 = BATCH_SUBMIT_SIZE * 2;
+            off_t phase1_offset_start = current_offset;
+            current_offset += phase_offset_increment;
+            std::cout << "Writing " << num_ops_phase1 << " blocks..." << std::endl;
+            for(int i = 0; i < num_ops_phase1; ++i) {
+                char pattern = 'A' + (i % 26);
+                off_t offset = phase1_offset_start + (off_t)i * BUFFER_SIZE;
+                int buffer_id = i % NUM_BUFFERS;
+                tasks.push_back(write_data_coro(*scheduler, buffers, buffer_id, offset, BUFFER_SIZE, pattern));
+                tasks.back().start();
+                if constexpr (SIMULATED_WORK_US > 0) usleep(SIMULATED_WORK_US); // Conditional sleep
+            }
+            run_tasks_to_completion(*scheduler, tasks, "Phase 1 Writes");
+            tasks.clear();
+            std::cout << "Reading and Verifying " << num_ops_phase1 << " blocks..." << std::endl;
+            for(int i = 0; i < num_ops_phase1; ++i) {
+                char expected_pattern = 'A' + (i % 26);
+                off_t offset = phase1_offset_start + (off_t)i * BUFFER_SIZE;
+                int buffer_id = (i + num_ops_phase1 / 2) % NUM_BUFFERS;
+                tasks.push_back(read_and_verify_data_coro(*scheduler, buffers, buffer_id, offset, BUFFER_SIZE, expected_pattern));
+                tasks.back().start();
+                if constexpr (SIMULATED_WORK_US > 0) usleep(SIMULATED_WORK_US); // Conditional sleep
+            }
+            run_tasks_to_completion(*scheduler, tasks, "Phase 1 Reads");
+            std::cout << "--- Test Phase 1 Complete ---" << std::endl;
+        }
 
-        std::cout << "\nAll io_uring scheduler tests passed!" << std::endl;
-        */
-        // --- End of Skipped DiskScheduler Tests ---
+        // --- Test Phase 2: Larger Data Test (Caller Buffer Management, Sequential) ---
+        // (Sequential, SIMULATED_WORK_US applies if > 0)
+        {
+            std::cout << "\n--- Test Phase 2: Larger Data Test (Caller Buffer Management, Sequential) ---" << std::endl;
+            const size_t large_data_num_blocks = NUM_BUFFERS * 3;
+            off_t phase2_offset_start = current_offset;
+            current_offset += phase_offset_increment;
+            const size_t large_data_size = large_data_num_blocks * BUFFER_SIZE;
+            std::cout << "Preparing to write " << large_data_num_blocks << " blocks (" << large_data_size << " bytes) at offset " << phase2_offset_start << "..." << std::endl;
+            std::vector<bool> buffer_is_busy(NUM_BUFFERS, false);
+            std::vector<std::pair<wutong::Task<bool>, int>> active_write_tasks;
+            active_write_tasks.reserve(NUM_BUFFERS);
+            size_t submitted_write_count = 0;
+            size_t completed_write_count = 0;
+            const size_t total_write_ops = large_data_num_blocks;
+            auto stage_start_time = std::chrono::high_resolution_clock::now();
+            while (completed_write_count < total_write_ops) {
+                while (submitted_write_count < total_write_ops) {
+                    int free_buffer_id = -1;
+                    for (int k = 0; k < NUM_BUFFERS; ++k) if (!buffer_is_busy[k]) { free_buffer_id = k; break; }
+                    if (free_buffer_id == -1) break;
+                    buffer_is_busy[free_buffer_id] = true;
+                    size_t i = submitted_write_count; // Use sequential index 'i'
+                    char pattern = 'L' + (i % 10);
+                    off_t offset = phase2_offset_start + (off_t)i * BUFFER_SIZE;
+                    active_write_tasks.emplace_back(write_data_coro(*scheduler, buffers, free_buffer_id, offset, BUFFER_SIZE, pattern), free_buffer_id);
+                    active_write_tasks.back().first.start();
+                    if constexpr (SIMULATED_WORK_US > 0) usleep(SIMULATED_WORK_US); // Conditional sleep
+                    submitted_write_count++;
+                }
+                scheduler->flush_requests();
+                size_t completions_handled_this_iteration = 0;
+                scheduler->handle_completions();
+                auto it = active_write_tasks.begin();
+                while (it != active_write_tasks.end()) {
+                    if (it->first.handle && it->first.handle.done()) {
+                        bool result = it->first.await_resume(); assert(result && "Phase 2 write task failed");
+                        buffer_is_busy[it->second] = false;
+                        it = active_write_tasks.erase(it); completed_write_count++; completions_handled_this_iteration++;
+                    } else if (!it->first.handle) { buffer_is_busy[it->second] = false; it = active_write_tasks.erase(it); }
+                    else { ++it; }
+                }
+                if (completions_handled_this_iteration == 0) {
+                    bool all_buffers_were_busy = (active_write_tasks.size() == NUM_BUFFERS); bool all_submitted = (submitted_write_count == total_write_ops);
+                    if ((all_buffers_were_busy && !all_submitted) || (all_submitted && !active_write_tasks.empty())) { usleep(500); }
+                }
+                auto now = std::chrono::high_resolution_clock::now(); auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - stage_start_time);
+                if (elapsed.count() > 180) { throw std::runtime_error("Timeout in Phase 2 Writes loop"); }
+            }
+            auto stage_end_time = std::chrono::high_resolution_clock::now(); auto stage_duration = std::chrono::duration_cast<std::chrono::milliseconds>(stage_end_time - stage_start_time);
+            std::cout << "Phase 2 Caller-Managed Writes completed in " << stage_duration.count() << " ms." << std::endl;
+            assert(completed_write_count == total_write_ops && active_write_tasks.empty());
+            // --- Read Phase (Sequential) ---
+            std::cout << "Preparing to read and verify " << large_data_num_blocks << " blocks..." << std::endl;
+            std::fill(buffer_is_busy.begin(), buffer_is_busy.end(), false);
+            std::vector<std::pair<wutong::Task<bool>, int>> active_read_tasks; active_read_tasks.reserve(NUM_BUFFERS);
+            size_t submitted_read_count = 0; size_t completed_read_count = 0; const size_t total_read_ops = large_data_num_blocks;
+            stage_start_time = std::chrono::high_resolution_clock::now();
+             while (completed_read_count < total_read_ops) {
+                while (submitted_read_count < total_read_ops) {
+                    int free_buffer_id = -1; for (int k = 0; k < NUM_BUFFERS; ++k) if (!buffer_is_busy[k]) { free_buffer_id = k; break; }
+                    if (free_buffer_id == -1) break;
+                    buffer_is_busy[free_buffer_id] = true;
+                    size_t i = submitted_read_count; // Use sequential index 'i'
+                    char expected_pattern = 'L' + (i % 10);
+                    off_t offset = phase2_offset_start + (off_t)i * BUFFER_SIZE;
+                    active_read_tasks.emplace_back(read_and_verify_data_coro(*scheduler, buffers, free_buffer_id, offset, BUFFER_SIZE, expected_pattern), free_buffer_id);
+                    active_read_tasks.back().first.start();
+                    if constexpr (SIMULATED_WORK_US > 0) usleep(SIMULATED_WORK_US); // Conditional sleep
+                    submitted_read_count++;
+                }
+                scheduler->flush_requests();
+                size_t completions_handled_this_iteration = 0; scheduler->handle_completions();
+                auto it = active_read_tasks.begin();
+                while (it != active_read_tasks.end()) {
+                    if (it->first.handle && it->first.handle.done()) {
+                        bool result = it->first.await_resume(); assert(result && "Phase 2 read task failed");
+                        buffer_is_busy[it->second] = false; it = active_read_tasks.erase(it); completed_read_count++; completions_handled_this_iteration++;
+                    } else if (!it->first.handle) { buffer_is_busy[it->second] = false; it = active_read_tasks.erase(it); }
+                    else { ++it; }
+                }
+                if (completions_handled_this_iteration == 0) {
+                    bool all_buffers_were_busy = (active_read_tasks.size() == NUM_BUFFERS); bool all_submitted = (submitted_read_count == total_read_ops);
+                    if ((all_buffers_were_busy && !all_submitted) || (all_submitted && !active_read_tasks.empty())) { usleep(500); }
+                }
+                auto now = std::chrono::high_resolution_clock::now(); auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - stage_start_time);
+                if (elapsed.count() > 180) { throw std::runtime_error("Timeout in Phase 2 Reads loop"); }
+            }
+            stage_end_time = std::chrono::high_resolution_clock::now(); stage_duration = std::chrono::duration_cast<std::chrono::milliseconds>(stage_end_time - stage_start_time);
+            std::cout << "Phase 2 Caller-Managed Reads completed in " << stage_duration.count() << " ms." << std::endl;
+            assert(completed_read_count == total_read_ops && active_read_tasks.empty());
+            std::cout << "--- Test Phase 2 Complete ---" << std::endl;
+        }
 
 
-        // --- Run fstream Benchmark (Random Access) ---
-        std::string fstream_filename = base_filename + "fstream_" + std::to_string(getpid()) + ".dat";
-        run_fstream_benchmark(fstream_filename, num_benchmark_ops, BUFFER_SIZE);
+        // --- Test Phase 3: Asynchronicity Check ---
+        // (Sequential, SIMULATED_WORK_US applies if > 0)
+        {
+            std::cout << "\n--- Test Phase 3: Asynchronicity Check ---" << std::endl;
+            std::vector<wutong::Task<bool>> io_tasks;
+            const int num_async_ops = BATCH_SUBMIT_SIZE * 4;
+            off_t phase3_offset_start = current_offset;
+            current_offset += phase_offset_increment;
+            std::cout << "Submitting " << num_async_ops << " async write operations..." << std::endl;
+            for (int i = 0; i < num_async_ops; ++i) {
+                char pattern = 'X'; off_t offset = phase3_offset_start + (off_t)i * BUFFER_SIZE; int buffer_id = i % NUM_BUFFERS;
+                io_tasks.push_back(write_data_coro(*scheduler, buffers, buffer_id, offset, BUFFER_SIZE, pattern));
+                io_tasks.back().start();
+                if constexpr (SIMULATED_WORK_US > 0) usleep(SIMULATED_WORK_US); // Conditional sleep
+            }
+            scheduler->flush_requests();
+            std::cout << "Async I/O submitted. Performing other work while I/O is in flight:" << std::endl;
+            auto start_time = std::chrono::high_resolution_clock::now(); volatile int non_io_work_counter = 0; const int work_iterations = 5;
+            for(int i = 0; i < work_iterations; ++i) {
+                std::cout << "  Doing non-I/O work unit " << (i + 1) << "/" << work_iterations << "..." << std::endl;
+                auto work_unit_start = std::chrono::high_resolution_clock::now();
+                for (int j = 0; j < 20000000; ++j) non_io_work_counter += (j % 3) -1;
+                auto work_unit_end = std::chrono::high_resolution_clock::now(); auto work_unit_duration = std::chrono::duration_cast<std::chrono::milliseconds>(work_unit_end - work_unit_start);
+                std::cout << "  Non-I/O work unit " << (i+1) << " done. (Counter: " << non_io_work_counter << ", Duration: " << work_unit_duration.count() << " ms)" << std::endl;
+                std::cout << "  Checking for I/O completions..." << std::endl;
+                size_t done_count_before = 0; for(const auto& task : io_tasks) if (!task.handle || task.handle.done()) done_count_before++;
+                scheduler->handle_completions();
+                size_t done_count_after = 0; bool all_io_done_this_check = true;
+                for(const auto& task : io_tasks) { if (task.handle && !task.handle.done()) all_io_done_this_check = false; else done_count_after++; }
+                std::cout << "  Handled completions. Progress: " << done_count_after << "/" << io_tasks.size() << " (Previously " << done_count_before << ")" << std::endl;
+                if (all_io_done_this_check) { std::cout << "  All async I/O operations completed during non-I/O work." << std::endl; break; }
+                else { std::cout << "  Some async I/O still pending." << std::endl; }
+            }
+            auto end_time = std::chrono::high_resolution_clock::now(); auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+            std::cout << "Non-I/O work phase took " << duration.count() << " ms." << std::endl;
+            std::cout << "Ensuring all async I/O tasks are fully completed..." << std::endl;
+            run_tasks_to_completion(*scheduler, io_tasks, "Phase 3 Async Writes Completion");
+            io_tasks.clear();
+            std::cout << "Verifying async writes..." << std::endl;
+            for (int i = 0; i < num_async_ops; ++i) {
+                 off_t offset = phase3_offset_start + (off_t)i * BUFFER_SIZE; int buffer_id = (i + num_async_ops / 2) % NUM_BUFFERS;
+                 io_tasks.push_back(read_and_verify_data_coro(*scheduler, buffers, buffer_id, offset, BUFFER_SIZE, 'X'));
+                io_tasks.back().start();
+                if constexpr (SIMULATED_WORK_US > 0) usleep(SIMULATED_WORK_US); // Conditional sleep
+            }
+            run_tasks_to_completion(*scheduler, io_tasks, "Phase 3 Async Writes Verification");
+            std::cout << "--- Test Phase 3 Complete ---" << std::endl;
+        }
 
-        // --- Run Raw io_uring Benchmark (Random Access) ---
-        std::string raw_iouring_filename = base_filename + "raw_iouring_" + std::to_string(getpid()) + ".dat";
-        // Pass the already allocated buffers to the raw benchmark
-        run_raw_iouring_benchmark(raw_iouring_filename, num_benchmark_ops, BUFFER_SIZE, QUEUE_DEPTH, buffers);
+        // --- Test Phase 4: High Concurrency Pressure Test (Caller Buffer Management, Random Access) ---
+        {
+            std::cout << "\n--- Test Phase 4: High Concurrency Pressure Test (Caller Buffer Management, Random Access) ---" << std::endl;
+            auto pressure_start_time = std::chrono::high_resolution_clock::now();
 
-        // --- Optional: Add POSIX Direct I/O Benchmark Call Here ---
-        // std::string posix_direct_filename = base_filename + "posix_direct_" + std::to_string(getpid()) + ".dat";
-        // run_posix_direct_benchmark(posix_direct_filename, num_benchmark_ops, BUFFER_SIZE, buffers); // Assuming buffers are needed
+            const int num_pressure_ops = QUEUE_DEPTH * 1000; // Increased ops count
+            off_t phase4_offset_start = current_offset;
+
+            // --- Generate and Shuffle Block Indices ---
+            std::vector<size_t> block_indices(num_pressure_ops);
+            std::iota(block_indices.begin(), block_indices.end(), 0); // 0, 1, 2...
+            std::random_device rd;
+            std::mt19937 g(rd());
+            std::shuffle(block_indices.begin(), block_indices.end(), g);
+            std::cout << "Phase 4: Generated and shuffled " << num_pressure_ops << " block indices." << std::endl;
+            // ---
+
+            // --- Caller-Managed Write Phase (Random Access) ---
+            std::cout << "Preparing " << num_pressure_ops << " concurrent write operations starting at offset " << phase4_offset_start << " (Random Access)..." << std::endl;
+            std::vector<bool> buffer_is_busy(NUM_BUFFERS, false);
+            std::vector<std::pair<wutong::Task<bool>, int>> active_write_tasks; active_write_tasks.reserve(NUM_BUFFERS);
+            size_t submitted_write_count = 0; size_t completed_write_count = 0; const size_t total_write_ops = num_pressure_ops;
+            auto stage_start_time = std::chrono::high_resolution_clock::now();
+            while (completed_write_count < total_write_ops) {
+                while (submitted_write_count < total_write_ops) {
+                    int free_buffer_id = -1; for (int k = 0; k < NUM_BUFFERS; ++k) if (!buffer_is_busy[k]) { free_buffer_id = k; break; }
+                    if (free_buffer_id == -1) break;
+                    buffer_is_busy[free_buffer_id] = true;
+                    size_t i = submitted_write_count;
+                    size_t block_idx = block_indices[i]; // Use shuffled index
+                    char pattern = 'P' + (block_idx % 26); // Pattern based on block index
+                    off_t offset = phase4_offset_start + (off_t)block_idx * BUFFER_SIZE; // Offset based on block index
+                    active_write_tasks.emplace_back(write_data_coro(*scheduler, buffers, free_buffer_id, offset, BUFFER_SIZE, pattern), free_buffer_id);
+                    active_write_tasks.back().first.start();
+                    // NO usleep here if SIMULATED_WORK_US is 0
+                    if constexpr (SIMULATED_WORK_US > 0) usleep(SIMULATED_WORK_US);
+                    submitted_write_count++;
+                }
+                scheduler->flush_requests();
+                size_t completions_handled_this_iteration = 0; scheduler->handle_completions();
+                auto it = active_write_tasks.begin();
+                while (it != active_write_tasks.end()) {
+                    if (it->first.handle && it->first.handle.done()) {
+                        bool result = it->first.await_resume(); assert(result && "Phase 4 write task failed");
+                        buffer_is_busy[it->second] = false; it = active_write_tasks.erase(it); completed_write_count++; completions_handled_this_iteration++;
+                    } else if (!it->first.handle) { buffer_is_busy[it->second] = false; it = active_write_tasks.erase(it); }
+                    else { ++it; }
+                }
+                if (completions_handled_this_iteration == 0) {
+                    bool all_buffers_were_busy = (active_write_tasks.size() == NUM_BUFFERS); bool all_submitted = (submitted_write_count == total_write_ops);
+                    if ((all_buffers_were_busy && !all_submitted) || (all_submitted && !active_write_tasks.empty())) { usleep(500); }
+                }
+                auto now = std::chrono::high_resolution_clock::now(); auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - stage_start_time);
+                if (elapsed.count() > 600) { // Increased timeout for more ops
+                     std::cerr << "Timeout waiting for Phase 4 writes!" << std::endl;
+                     std::cerr << "Completed: " << completed_write_count << "/" << total_write_ops << std::endl;
+                     std::cerr << "Active: " << active_write_tasks.size() << std::endl;
+                     throw std::runtime_error("Timeout in Phase 4 Writes loop");
+                }
+            }
+            auto stage_end_time = std::chrono::high_resolution_clock::now(); auto stage_duration = std::chrono::duration_cast<std::chrono::milliseconds>(stage_end_time - stage_start_time);
+            std::cout << "Phase 4 Caller-Managed Writes (Random) completed in " << stage_duration.count() << " ms." << std::endl;
+            assert(completed_write_count == total_write_ops && active_write_tasks.empty());
+
+            // --- Caller-Managed Read Phase (Random Access) ---
+            std::cout << "Preparing " << num_pressure_ops << " concurrent read and verification operations (Random Access)..." << std::endl;
+            std::fill(buffer_is_busy.begin(), buffer_is_busy.end(), false);
+            std::vector<std::pair<wutong::Task<bool>, int>> active_read_tasks; active_read_tasks.reserve(NUM_BUFFERS);
+            size_t submitted_read_count = 0; size_t completed_read_count = 0; const size_t total_read_ops = num_pressure_ops;
+            stage_start_time = std::chrono::high_resolution_clock::now();
+             while (completed_read_count < total_read_ops) {
+                while (submitted_read_count < total_read_ops) {
+                    int free_buffer_id = -1; for (int k = 0; k < NUM_BUFFERS; ++k) if (!buffer_is_busy[k]) { free_buffer_id = k; break; }
+                    if (free_buffer_id == -1) break;
+                    buffer_is_busy[free_buffer_id] = true;
+                    size_t i = submitted_read_count;
+                    size_t block_idx = block_indices[i]; // Use same shuffled index
+                    char expected_pattern = 'P' + (block_idx % 26); // Pattern based on block index
+                    off_t offset = phase4_offset_start + (off_t)block_idx * BUFFER_SIZE; // Offset based on block index
+                    active_read_tasks.emplace_back(read_and_verify_data_coro(*scheduler, buffers, free_buffer_id, offset, BUFFER_SIZE, expected_pattern), free_buffer_id);
+                    active_read_tasks.back().first.start();
+                    // NO usleep here if SIMULATED_WORK_US is 0
+                    if constexpr (SIMULATED_WORK_US > 0) usleep(SIMULATED_WORK_US);
+                    submitted_read_count++;
+                }
+                scheduler->flush_requests();
+                size_t completions_handled_this_iteration = 0; scheduler->handle_completions();
+                auto it = active_read_tasks.begin();
+                while (it != active_read_tasks.end()) {
+                    if (it->first.handle && it->first.handle.done()) {
+                        bool result = it->first.await_resume(); assert(result && "Phase 4 read task failed");
+                        buffer_is_busy[it->second] = false; it = active_read_tasks.erase(it); completed_read_count++; completions_handled_this_iteration++;
+                    } else if (!it->first.handle) { buffer_is_busy[it->second] = false; it = active_read_tasks.erase(it); }
+                    else { ++it; }
+                }
+                if (completions_handled_this_iteration == 0) {
+                    bool all_buffers_were_busy = (active_read_tasks.size() == NUM_BUFFERS); bool all_submitted = (submitted_read_count == total_read_ops);
+                    if ((all_buffers_were_busy && !all_submitted) || (all_submitted && !active_read_tasks.empty())) { usleep(500); }
+                }
+                auto now = std::chrono::high_resolution_clock::now(); auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - stage_start_time);
+                 if (elapsed.count() > 600) { // Increased timeout for more ops
+                     std::cerr << "Timeout waiting for Phase 4 reads!" << std::endl;
+                     std::cerr << "Completed: " << completed_read_count << "/" << total_read_ops << std::endl;
+                     std::cerr << "Active: " << active_read_tasks.size() << std::endl;
+                     throw std::runtime_error("Timeout in Phase 4 Reads loop");
+                }
+            }
+            stage_end_time = std::chrono::high_resolution_clock::now(); stage_duration = std::chrono::duration_cast<std::chrono::milliseconds>(stage_end_time - stage_start_time);
+            std::cout << "Phase 4 Caller-Managed Reads (Random) completed in " << stage_duration.count() << " ms." << std::endl;
+            assert(completed_read_count == total_read_ops && active_read_tasks.empty());
+
+            // --- Calculate and Print Phase 4 Stats ---
+            auto pressure_end_time = std::chrono::high_resolution_clock::now();
+            auto pressure_duration = std::chrono::duration_cast<std::chrono::milliseconds>(pressure_end_time - pressure_start_time);
+            double total_data_gb = 2.0 * num_pressure_ops * BUFFER_SIZE / (1024.0 * 1024.0 * 1024.0);
+            double duration_sec = pressure_duration.count() / 1000.0;
+            double throughput_mibps = (duration_sec > 0) ? (total_data_gb * 1024.0) / duration_sec : 0; // MiB/s
+            double iops = (duration_sec > 0) ? (2.0 * num_pressure_ops) / duration_sec : 0;
+            std::cout << "--- Test Phase 4 Complete ---" << std::endl;
+            std::cout << "    Access Pattern: Random" << std::endl; // Note access pattern
+            std::cout << "    Total Duration (W+R): " << pressure_duration.count() << " ms" << std::endl;
+            std::cout << "    Total Ops (W+R): " << 2 * num_pressure_ops << std::endl;
+            std::cout << "    Total Data (W+R): " << total_data_gb << " GiB" << std::endl;
+            std::cout << "    Approx Throughput: " << throughput_mibps << " MiB/s" << std::endl;
+             std::cout << "    Approx IOPS: " << iops << std::endl;
+            std::cout << "---------------------------" << std::endl;
+        } // End of Phase 4 block
+
+
+        std::cout << "\nAll tests passed!" << std::endl;
+
+        
 
 
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
-        if (scheduler) delete scheduler; // Delete if it was created
+        if (scheduler) delete scheduler;
         free_aligned_buffers(buffers);
-        // Benchmark files are removed internally or attempt removal here if needed
+        if (remove(test_filename.c_str()) != 0) {
+             perror(("Error deleting test file: " + test_filename).c_str());
+        }
         return 1;
     } catch (...) {
         std::cerr << "Caught unknown exception!" << std::endl;
-         if (scheduler) delete scheduler; // Delete if it was created
+         if (scheduler) delete scheduler;
         free_aligned_buffers(buffers);
+         if (remove(test_filename.c_str()) != 0) {
+             perror(("Error deleting test file: " + test_filename).c_str());
+        }
         return 1;
     }
 
-    // --- Cleanup ---
+
     std::cout << "Cleaning up..." << std::endl;
-    if (scheduler) delete scheduler; // Delete scheduler only if it was initialized
+    delete scheduler;
     scheduler = nullptr;
-    free_aligned_buffers(buffers); // Free buffers used by raw benchmark
-    // Benchmark files are removed within their respective functions
+    free_aligned_buffers(buffers);
+    // remove(test_filename.c_str()); // Already removed by fstream bench, or handled in catch
     std::cout << "Cleanup complete." << std::endl;
 
     return 0;
