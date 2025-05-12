@@ -3,12 +3,15 @@
 #include "shared.hpp"
 #include "stlite/looped_queue.hpp"
 #include "stlite/vector.hpp"
+#include "stlite/sized_queue.h"
+#include "disk_scheduler.h"
 #include "utils.hpp"
 #include <cmath>
 #include <filesystem>
 #include <limits>
 #include <memory>
 #include <string>
+
 
 namespace norb {
   /**

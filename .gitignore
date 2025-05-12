@@ -1,2 +1,4 @@
 .mango
 dist
+.idea
+cmake-build-debug/
