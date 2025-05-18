@@ -29,5 +29,9 @@ namespace norb {
         return q_[0];
       return q_[cur_ % capacity_];
     }
+    void clear() {
+      cur_=0;
+      size_=0;
+    }
   };
 } // namespace norb

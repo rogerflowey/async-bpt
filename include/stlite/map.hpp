@@ -718,6 +718,15 @@ namespace sjtu {
       maintain(temp_parent);
     }
 
+    bool erase(const Key& key) {
+      auto it = find(key);
+      if(it==end()) {
+        return false;
+      }
+      erase(it);
+      return true;
+    }
+
     /**
      * Returns the number of elements with key
      *   that compares equivalent to the specified argument,

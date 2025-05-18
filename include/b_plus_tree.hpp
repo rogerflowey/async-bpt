@@ -99,7 +99,7 @@ namespace norb {
      * @param index The key-val pair to search for.
      * @return The index to the next node to search in.
      */
-    static size_t lower_bound(const IndexNode &node,
+    static size_t  lower_bound(const IndexNode &node,
                               const index_storage_t_ &index) {
       size_t left = 0, right = node.size - 1;
       while (left < right) {

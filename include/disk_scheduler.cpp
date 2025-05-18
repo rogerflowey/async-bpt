@@ -8,7 +8,7 @@ DiskScheduler::DiskScheduler(const std::string& file_name, int queue_depth, unsi
     throw std::runtime_error("io_uring_queue_init failed: " + std::string(strerror(-ret)));
   }
 
-  fd_ = open(file_name.c_str(), O_RDWR | O_CREAT | O_DIRECT, 0644); // Added O_DIRECT
+  fd_ = open(file_name.c_str(), O_RDWR | O_CREAT | O_DIRECT, 0644);
   if (fd_ < 0) {
     io_uring_queue_exit(&ring_);
     throw std::runtime_error("file open failed: " + std::string(strerror(errno)));
@@ -44,7 +44,7 @@ DiskScheduler::~DiskScheduler() {
   }
 }
 
-void DiskScheduler::register_buffers(const norb::vector<void *> &buffers) {
+void DiskScheduler::register_buffers(const sjtu::vector<void *> &buffers) {
   struct iovec *iovs = new iovec[buffers.size()];
   registered_buffers_ = buffers;
   for (size_t i = 0; i < buffers.size(); ++i) {
@@ -61,6 +61,10 @@ void DiskScheduler::register_buffers(const norb::vector<void *> &buffers) {
   }
 }
 void DiskScheduler::submit_request(IORequest *req) {
+
+  if (req->buffer_id_ < 0 || static_cast<size_t>(req->buffer_id_) >= registered_buffers_.size()) {
+    throw std::out_of_range("Invalid buffer_id provided to submit_request: " + std::to_string(req->buffer_id_));
+  }
   struct io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
   if (!sqe) {
     int submitted = io_uring_submit(&ring_);
@@ -73,11 +77,6 @@ void DiskScheduler::submit_request(IORequest *req) {
     }
   }
 
-
-  if (req->buffer_id_ < 0 || static_cast<size_t>(req->buffer_id_) >= registered_buffers_.size()) {
-      io_uring_sqe_set_data(sqe, nullptr);
-      throw std::out_of_range("Invalid buffer_id provided to submit_request: " + std::to_string(req->buffer_id_));
-  }
   void* buffer_addr = registered_buffers_[req->buffer_id_];
 
   const int file_index = 0;
@@ -102,6 +101,7 @@ void DiskScheduler::submit_request(IORequest *req) {
     }
     sqes_prepared_count_ = 0;
   }
+  ++unfinished_requests_count_;
 }
 
 void DiskScheduler::flush_requests() {
@@ -116,6 +116,7 @@ void DiskScheduler::flush_requests() {
 }
 
 void DiskScheduler::handle_completions() {
+  static unsigned long long time_cnt = 0;
   io_uring_cqe* cqe;
   unsigned head;
   unsigned count = 0;
@@ -124,18 +125,30 @@ void DiskScheduler::handle_completions() {
     req->result_ = (cqe->res >= 0) &&
                  (static_cast<size_t>(cqe->res) == req->count_);
 
+    req->finished_ = true;
     if (req->coro_handle) {
       req->coro_handle.resume();  // 恢复协程
     }
     ++count;
+    --unfinished_requests_count_;
   }
   io_uring_cq_advance(&ring_, count);
+  time_cnt++;
+  if(time_cnt%16==0) {
+    //flush every 16 loop to ensure that there won't be someone waiting for remaining
+    flush_requests();
+  }
 }
 
 IOAwaitable DiskScheduler::async_read(int buffer_id, size_t count, off_t offset) {
-  return {*this, IORequest::Read, buffer_id, count, offset};
+  auto req = std::make_unique<IORequest>(IORequest::Read, buffer_id, count, offset);
+  submit_request(req.get());
+  return {*this, std::move(req)};
 }
 
 IOAwaitable DiskScheduler::async_write(int buffer_id, size_t count, off_t offset) {
-  return {*this, IORequest::Write, buffer_id, count, offset};
+  auto req = std::make_unique<IORequest>(IORequest::Write, buffer_id, count, offset);
+  submit_request(req.get());
+  return {*this, std::move(req)};
 }
+

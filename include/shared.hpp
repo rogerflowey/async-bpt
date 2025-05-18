@@ -17,10 +17,10 @@ namespace norb {
   constexpr page_id_t LRU_K_INDEX = 2;
   constexpr size_t OVERWRITE_BLOCK_SIZE = 8;
 #else
-  constexpr page_size_t MEMORY_SIZE = 4096 * 1248;
+  constexpr page_size_t MEMORY_SIZE = 4096 * 8;
   constexpr page_size_t PAGE_SIZE = 4096;
-  constexpr page_id_t LRU_K_INDEX = 20;
+  constexpr page_id_t LRU_K_INDEX = 2;
 #endif
 
-  const std::string PMEM_FILE_NAME = "persistent_memory.db";
+  const std::string PMEM_FILE_NAME = "pma_test.db";
 } // namespace norb

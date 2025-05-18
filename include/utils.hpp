@@ -129,7 +129,7 @@ namespace norb {
     }
 
     template <typename T_>
-    bool equals(const norb::vector<T_> &a, const norb::vector<T_> &b) {
+    bool equals(const sjtu::vector<T_> &a, const sjtu::vector<T_> &b) {
       if (a.size() != b.size()) return false;
       for (size_t i = 0; i < a.size(); ++i) {
         if (a[i] != b[i]) return false;
@@ -158,102 +158,4 @@ namespace norb {
   }; // namespace chore
 } // namespace norb
 
-namespace wutong {
-  template<typename T>
-struct Task {
-    struct promise_type {
-      T result; // Store result directly
-
-      Task<T> get_return_object() { return Task{std::coroutine_handle<promise_type>::from_promise(*this)}; }
-      std::suspend_always initial_suspend() noexcept { return {}; }
-      std::suspend_always final_suspend() noexcept { return {}; }
-      void return_value(T value) { result = value; }
-      void unhandled_exception() {
-        // Simple termination, could be improved to store exception_ptr
-        std::terminate();
-      }
-
-    };
-
-    std::coroutine_handle<promise_type> handle;
-
-    explicit Task(std::coroutine_handle<promise_type> h) : handle(h) {}
-    Task(Task&& other) noexcept : handle(std::exchange(other.handle, nullptr)) {}
-    Task& operator=(Task&& other) noexcept {
-      if (handle) handle.destroy();
-      handle = std::exchange(other.handle, nullptr);
-      return *this;
-    }
-    ~Task() { if (handle) handle.destroy(); }
-
-    // Make Task awaitable itself to get the result
-    bool await_ready() const noexcept {
-      // Ready if the coroutine already finished
-      return !handle || handle.done();
-    }
-
-    void await_suspend(std::coroutine_handle<> continuation) noexcept {
-      // Store the continuation and resume it when the task completes.
-      // This basic Task doesn't support chaining well without modification.
-      // For this test, we'll poll handle.done() externally.
-      // A more complex implementation would chain continuations.
-      // We *could* resume the task here if it wasn't started,
-      // but our test structure handles that.
-      // handle.resume(); // Don't resume here in this simple model
-    }
-
-    T await_resume() noexcept {
-      if (!handle) {
-        return T{};
-      }
-      return handle.promise().result;
-    }
-    void start() {
-      if (handle && !handle.done()) {
-        handle.resume();
-      }
-    }
-  };
-
-  template<>
-  struct Task<void> {
-    struct promise_type {
-      Task<void> get_return_object() { return Task{std::coroutine_handle<promise_type>::from_promise(*this)}; }
-      std::suspend_always initial_suspend() noexcept { return {}; }
-      std::suspend_always final_suspend() noexcept { return {}; }
-      void return_void() {} // No result to store
-      void unhandled_exception() { std::terminate(); }
-    };
-
-    std::coroutine_handle<promise_type> handle;
-
-    explicit Task(std::coroutine_handle<promise_type> h) : handle(h) {}
-    Task(Task&& other) noexcept : handle(std::exchange(other.handle, nullptr)) {}
-    Task& operator=(Task&& other) noexcept {
-      if (handle) handle.destroy();
-      handle = std::exchange(other.handle, nullptr);
-      return *this;
-    }
-    ~Task() { if (handle) handle.destroy(); }
-
-    // Awaitable interface for Task<void>
-    bool await_ready() const noexcept {
-      return !handle || handle.done();
-    }
-
-    void await_suspend(std::coroutine_handle<> continuation) noexcept {
-      // See comment in Task<T>
-    }
-
-    void await_resume() noexcept {
-      // No return value
-    }
-
-    // Added method to explicitly start the coroutine
-    void start() {
-      if (handle && !handle.done()) {
-        handle.resume();
-      }
-    }
-  };
-}
+struct nothing{};
