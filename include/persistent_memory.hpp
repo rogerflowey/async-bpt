@@ -120,7 +120,7 @@ namespace norb {
      * @brief A helper class to collect deallocated pages.
      */
     class GarbageCollector {
-      vector<page_id_t> garbage;
+      sjtu::vector<page_id_t> garbage;
 
     public:
       GarbageCollector() = default;

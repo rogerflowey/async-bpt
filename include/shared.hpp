@@ -17,9 +17,10 @@ namespace norb {
   constexpr page_id_t LRU_K_INDEX = 2;
   constexpr size_t OVERWRITE_BLOCK_SIZE = 8;
 #else
-  constexpr page_size_t MEMORY_SIZE = 4096 * 8;
+  constexpr slot_id_t SLOT_MAX_SIZE = 1024;
+  constexpr page_size_t MEMORY_SIZE = 4096 * SLOT_MAX_SIZE;
   constexpr page_size_t PAGE_SIZE = 4096;
-  constexpr page_id_t LRU_K_INDEX = 2;
+  constexpr page_id_t LRU_K_INDEX = 3;
 #endif
 
   const std::string PMEM_FILE_NAME = "pma_test.db";

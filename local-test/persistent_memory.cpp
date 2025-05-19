@@ -1,4 +1,5 @@
 #include "persistent_memory.hpp"
+#include "persistent_memory_async.hpp"
 
 #include <iostream>
 #include <vector>

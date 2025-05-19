@@ -1,6 +1,6 @@
 #pragma once
 
-#include "persistent_memory.hpp"
+#include "persistent_memory_async.hpp"
 #include "stlite/filed_config.hpp"
 #include "stlite/pair.hpp"
 
@@ -11,11 +11,14 @@ template<typename T>
 using vector = sjtu::vector<T>;
 
 namespace norb {
-  template <typename idx_t_, typename val_t> class BPlusTree {
+  //template <typename idx_t_, typename val_t>
+  using idx_t_ = int;
+  using val_t = int;
+  class AsyncBPlusTree {
   private:
     using index_storage_t_ = Pair<idx_t_, val_t>;
     using leaf_storage_t_ = Pair<idx_t_, val_t>;
-    using MutableHandle = PersistentMemory::MutableHandle;
+    using MutableHandle = PersistentMemoryAsync::MutableHandle;
     template <typename val_t_>
     using TrackedConfig = FiledConfig::tracker_t_<val_t_>;
     using stack_frame_t_ = std::pair<MutableHandle, size_t>;
@@ -210,7 +213,7 @@ namespace norb {
           parent_node_href->children[insert_at_pos].template ref<LeafNode>();
       // dup the leaf node
       const MutableHandle new_node_handle =
-          PersistentMemory::create_mutable_and_init<LeafNode>();
+          PersistentMemoryAsync::create_mutable_and_init<LeafNode>();
       auto new_node_href = new_node_handle.ref<LeafNode>();
       // update the sizes
       const auto new_leaf_size =
@@ -238,7 +241,7 @@ namespace norb {
       auto old_node_href =
           parent_node_href->children[insert_at_pos].template ref<IndexNode>();
       const MutableHandle new_node_handle =
-          PersistentMemory::create_mutable_and_init<IndexNode>();
+          PersistentMemoryAsync::create_mutable_and_init<IndexNode>();
       auto new_node_href = new_node_handle.ref<IndexNode>();
       // update the sizes
       new_node_href->layer = old_node_href->layer;
@@ -261,7 +264,7 @@ namespace norb {
 
     void handle_root_overflow(const node_type &root_node_is) {
       const auto new_root_handle =
-          PersistentMemory::create_mutable_and_init<IndexNode>();
+          PersistentMemoryAsync::create_mutable_and_init<IndexNode>();
       auto new_root_href = new_root_handle.template ref<IndexNode>();
       new_root_href->layer = tree_height.val++;
       new_root_href->size = 1;
@@ -306,7 +309,7 @@ namespace norb {
                        node_id + 1);
       --parent_node_href->size;
       // remove the page
-      PersistentMemory::remove<LeafNode>(right_node_handle);
+      PersistentMemoryAsync::remove<LeafNode>(right_node_handle);
     }
 
     /**
@@ -335,7 +338,7 @@ namespace norb {
                        node_id + 1);
       --parent_node_href->size;
       // remove the page
-      PersistentMemory::remove<LeafNode>(right_node_handle);
+      PersistentMemoryAsync::remove<LeafNode>(right_node_handle);
     }
 
     /**
@@ -453,16 +456,16 @@ namespace norb {
       const auto old_root_handle = root_handle.val;
       if (root_node_is == node_type::index) {
         root_handle.val = old_root_handle.const_ref<IndexNode>()->children[0];
-        PersistentMemory::remove<IndexNode>(old_root_handle);
+        PersistentMemoryAsync::remove<IndexNode>(old_root_handle);
       } else {
         root_handle.val.set_nullptr();
-        PersistentMemory::remove<LeafNode>(old_root_handle);
+        PersistentMemoryAsync::remove<LeafNode>(old_root_handle);
       }
     }
 
   public:
-    BPlusTree() = default;
-    ~BPlusTree() = default;
+    AsyncBPlusTree() = default;
+    ~AsyncBPlusTree() = default;
 
     [[nodiscard]] size_t size() const { return tree_size.val; }
 
@@ -523,7 +526,7 @@ namespace norb {
       ++tree_size.val;
       if (tree_height.val == 0) {
         // create the first node and insert the element
-        root_handle.val = PersistentMemory::create_mutable_and_init<LeafNode>();
+        root_handle.val = PersistentMemoryAsync::create_mutable_and_init<LeafNode>();
         LeafNode &node = *root_handle.val.ref<LeafNode>();
         node.data[node.size++] = norb::make_pair(key, val);
         ++tree_height.val;

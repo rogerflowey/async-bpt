@@ -41,6 +41,8 @@ namespace sjtu {
       }
     }
 
+
+
     /*
     void check_shrink() {
       if(_size<=int(capacity*SHRINK_RATE)) {
@@ -558,6 +560,17 @@ namespace sjtu {
       _size -= 1;
       data[_size].~T();
       //check_shrink();
+    }
+
+    void reserve(int size) {
+      if(size<=capacity) {
+        return;
+      }
+      capacity = size;
+      T *new_data = static_cast<T *>(operator new(capacity * SIZE));
+      memcpy(new_data, data, _size * SIZE);
+      operator delete(data);
+      data = new_data;
     }
   };
 }

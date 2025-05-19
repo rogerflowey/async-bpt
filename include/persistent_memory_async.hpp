@@ -16,6 +16,8 @@
 #include <string>
 
 #include <iostream>
+#include <map>
+
 
 namespace norb {
   /**
@@ -48,7 +50,7 @@ namespace norb {
         std::numeric_limits<time_stamp_t>::max();
 
     // The number of pages the memory can store.
-    static constexpr slot_id_t SLOT_COUNT = MEMORY_SIZE / PAGE_SIZE;
+    static constexpr slot_id_t SLOT_COUNT = SLOT_MAX_SIZE;
     static_assert(LRU_K_INDEX <= SLOT_COUNT,
                   "LRU_K_INDEX is larger than PAGE_COUNT");
 
@@ -80,6 +82,9 @@ namespace norb {
       }
 
       void Reset() {
+#ifdef PMA_DEBUG
+        std::cout<<"Clearing slot:"<<slot_id<<std::endl;
+#endif
         history.clear();
         buffer_page_id = -1;
         is_dirty = false;
@@ -120,25 +125,47 @@ namespace norb {
 
     // Find and pop the lru-k page from the buffer
     slot_id_t get_lru_k() {
-      if (evict_order.empty())
+      if (evict_order.empty()){
+        std::cerr<<"Memory Buffer overflowed!"<<std::endl;
         throw std::overflow_error("Memory Buffer overflowed!");
+      }
       slot_id_t slot_id = evict_order.cbegin()->second;
       evict_order.erase(evict_order.begin());
+#ifdef PMA_DEBUG
+      std::cout<<"Slot erased from map:"<<slot_id<<std::endl;
+#endif
+
+      slots[slot_id].it = {};
+      if (slots[slot_id].buffer_page_id != static_cast<page_id_t>(-1)) {
+        page_table.erase(slots[slot_id].buffer_page_id);
+      }
       return slot_id;
+    }
+
+    //Should check this before creating a coroutine
+    bool permit_IO() {
+      if(evict_order.size()<=SLOT_COUNT/2) {
+        return false;
+      }
+      return true;
     }
 
     // Evict a page from the buffer pool
     wutong::Task<void> evict_page(const slot_id_t &slot_id) {
       auto &slot = slots[slot_id];
-      if (slot.buffer_page_id != static_cast<page_id_t>(-1)) {
-        page_table.erase(slot.buffer_page_id);
-      }
       if (slot.is_dirty) {
         // write back to disk
         const page_id_t page_id = slot.buffer_page_id;
-        bool success = co_await fmemory.async_write(slot_id, PAGE_SIZE,
+#ifdef PMA_DEBUG
+        std::cout<<"Sending write request in evict_page,slot id:"<<slot_id<<" page_id:"<<page_id<<std::endl;
+#endif
+        bool success = co_await fmemory.async_write(buffer[slot_id], PAGE_SIZE,
                                                     page_id * PAGE_SIZE);
+#ifdef PMA_DEBUG
+        std::cout<<"Finish write request in evict_page,slot id:"<<slot_id<<" page_id:"<<page_id<<std::endl;
+#endif
         assert(success);
+        slot.is_dirty = false;
       }
     }
 
@@ -149,37 +176,49 @@ namespace norb {
         co_return found_slot_id;
       }
 
-      //bool is_lead = false;
-      //wutong::SharedTask<slot_id_t> task;
-      //auto it = ongoing.find(page_id);
-      //if (it != ongoing.end()) {
-      //  // if there are ongoing requests on the same page and is processing
-      //  task = it->second;
-      //} else {
-      //  is_lead = true;
-      //  task = evict_and_load(page_id, is_new);
-      //  it = ongoing.insert({page_id, task}).first;
-      //}
-      //slot_id_t slot_id = co_await task;
-      //if (is_lead) {
-      //  ongoing.erase(it);
-      //}
-      //co_return slot_id;
-
-      wutong::SharedTask<slot_id_t> shared_op_task = evict_and_load(page_id, is_new);
-      slot_id_t slot_id = co_await shared_op_task;
+      bool is_lead = false;
+      wutong::SharedTask<slot_id_t> task;
+      auto it = ongoing.find(page_id);
+      if (it != ongoing.end()) {
+        // if there are ongoing requests on the same page and is processing
+        task = it->second;
+      } else {
+        is_lead = true;
+        task = evict_and_load(page_id, is_new);
+        it = ongoing.insert({page_id, task}).first;
+      }
+      slot_id_t slot_id = co_await task;
+      if (is_lead) {
+        ongoing.erase(it);
+        slots[slot_id].lock_count--;
+      }
       co_return slot_id;
+
+      //wutong::SharedTask<slot_id_t> shared_op_task = evict_and_load(page_id, is_new);
+      //slot_id_t slot_id = co_await shared_op_task;
+      //co_return slot_id;
     }
 
     wutong::SharedTask<slot_id_t> evict_and_load(page_id_t page_id,
                                                  bool is_new = false) {
       slot_id_t slot_id = get_lru_k();
       auto &slot = slots[slot_id];
-      slot.it = {};
+#ifdef PMA_DEBUG
+      std::cout<<"Evict slot:"<<slot_id<<" which stores:"<<slot.buffer_page_id<<" for page:"<<page_id<<std::endl;
+#endif
       co_await evict_page(slot_id);
       if (!is_new) {
-        bool success = co_await fmemory.async_read(slot_id, PAGE_SIZE,
+#ifdef PMA_DEBUG
+        memset(buffer[slot_id], 'X', PAGE_SIZE);
+#endif
+#ifdef PMA_DEBUG
+        std::cout<<"Sending read request in evict_and_load,slot id:"<<slot_id<<" page_id:"<<page_id<<std::endl;
+#endif
+        bool success = co_await fmemory.async_read(buffer[slot_id], PAGE_SIZE,
                                                    page_id * PAGE_SIZE);
+#ifdef PMA_DEBUG
+        std::cout<<"Finish read request in evict_and_load,slot id:"<<slot_id<<" page_id:"<<page_id<<std::endl;
+#endif
         assert(success);
       }
       // metadata
@@ -187,28 +226,47 @@ namespace norb {
       slot.buffer_page_id = page_id;
       page_table.insert({page_id, slot_id});
 
+      slot.lock_count++;
+
       co_return slot_id;
     }
 
     void update_history(const slot_id_t slot_id) {
       auto &slot = slots[slot_id];
+#ifdef PMA_DEBUG
+      std::cout<<"Updating slot:"<<slot_id<<std::endl;
+#endif
       slot.history.insert(time_stamp);
       ++time_stamp;
     }
 
     void lock_slot(const slot_id_t slot_id) {
       auto &slot = slots[slot_id];
+#ifdef PMA_DEBUG
+      std::cout<<"Locking slot:"<<slot_id<<"pin:"<<slot.lock_count<<std::endl;
+#endif
+
       if (++slot.lock_count == 1 && !slot.history.empty()) {
-        evict_order.erase(slot.it);
-        slot.it = {};
+        if(slot.it!=decltype(slot.it){}) {
+          evict_order.erase(slot.it);
+          slot.it = {};
+        }else {
+          //std::cerr<<"WARNING: locking slot with empty iterator, slot id:"<<slot_id<<std::endl;
+        }
       };
     }
 
     void unlock_slot(const slot_id_t slot_id) {
       auto &slot = slots[slot_id];
+#ifdef PMA_DEBUG
+      std::cout<<"Unlocking slot:"<<slot_id<<"pin:"<<slot.lock_count<<std::endl;
+#endif
       if (--slot.lock_count == 0) {
         assert(slot.it == decltype(slot.it){});
         slot.it = evict_order.insert({slot.get_timestamp(), slot_id}).first;
+#ifdef PMA_DEBUG
+        std::cout<<"Releasing slot:"<<slot_id<<std::endl;
+#endif
       };
     }
 
@@ -277,6 +335,12 @@ namespace norb {
       HandledReference(PersistentMemoryAsync &pmem, slot_id_t sid,
                        page_id_t pid)
           : pmem_ptr_(&pmem), slot_id_(sid), page_id_(pid) {
+        assert(pmem_ptr_ != nullptr && "PMA pointer is null in HandledReference constructor");
+        assert(slot_id_ != static_cast<slot_id_t>(-1) && "Invalid slot_id in HandledReference constructor");
+        assert(page_id_ != static_cast<page_id_t>(-1) && "Invalid page_id in HandledReference constructor");
+        // CRITICAL ASSERTION: The slot's metadata must match the page_id this reference is for.
+        assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_ && "PMA: Slot metadata page_id mismatch with handle's page_id at mutable ref creation");
+
         pmem_ptr_->lock_slot(slot_id_);
         pmem_ptr_->update_history(slot_id_);
         pmem_ptr_->slots[slot_id_].is_dirty = true;
@@ -323,6 +387,12 @@ namespace norb {
         return *reinterpret_cast<T *>(pmem_ptr_->buffer[slot_id_]);
       }
 
+      T *as_raw_ptr() const {
+        assert(pmem_ptr_ && slot_id_ != static_cast<slot_id_t>(-1));
+        assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_);
+        return reinterpret_cast<T *>(pmem_ptr_->buffer[slot_id_]);
+      }
+
       void Drop() {
         if (!pmem_ptr_ || slot_id_ == -1) {
           return;
@@ -350,6 +420,11 @@ namespace norb {
       ConstHandledReference(PersistentMemoryAsync &pmem, slot_id_t sid,
                             page_id_t pid)
           : pmem_ptr_(&pmem), slot_id_(sid), page_id_(pid) {
+        assert(pmem_ptr_ != nullptr && "PMA pointer is null in ConstHandledReference constructor");
+        assert(slot_id_ != static_cast<slot_id_t>(-1) && "Invalid slot_id in ConstHandledReference constructor");
+        assert(page_id_ != static_cast<page_id_t>(-1) && "Invalid page_id in ConstHandledReference constructor");
+        assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_ && "PMA: Slot metadata page_id mismatch with handle's page_id at const_ref creation");
+
         pmem_ptr_->lock_slot(slot_id_);
         pmem_ptr_->update_history(slot_id_);
       }
@@ -396,6 +471,12 @@ namespace norb {
         return *reinterpret_cast<T *>(pmem_ptr_->buffer[slot_id_]);
       }
 
+      const T *as_raw_ptr() const {
+        assert(pmem_ptr_ && slot_id_ != static_cast<slot_id_t>(-1));
+        assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_);
+        return reinterpret_cast<T *>(pmem_ptr_->buffer[slot_id_]);
+      }
+
       void Drop() {
         if (!pmem_ptr_ || slot_id_ == -1) {
           return;
@@ -408,7 +489,7 @@ namespace norb {
     };
 
     explicit PersistentMemoryAsync(const std::string &path)
-        : fmemory(path, 256) {
+        : fmemory(path, SLOT_COUNT) {
       // create the file if it does not exist
       filesystem::fassert(path);
       filesystem::fassert(path + ".config");
@@ -432,13 +513,14 @@ namespace norb {
         slots[i].slot_id = i;
         slots[i].Reset();
         slots[i].it = evict_order.insert({{0, (time_stamp_t)i}, i})
-                          .first; // Use unique initial timestamps
+                          .first;
       }
+      time_stamp=SLOT_COUNT;
       sjtu::vector<void *> buffers = {};
       for (auto & i : buffer) {
         buffers.push_back(&i);
       }
-      fmemory.register_buffers(buffers);
+      //fmemory.register_buffers(buffers);
     }
     explicit PersistentMemoryAsync(const char *path)
         : PersistentMemoryAsync(std::string(path)) {}
@@ -451,7 +533,7 @@ namespace norb {
         if (slot.buffer_page_id != static_cast<page_id_t>(-1) &&
             slot.is_dirty) {
           write_tasks.push_back(
-              fmemory.async_write(slot.slot_id, PAGE_SIZE,
+              fmemory.async_write(buffer[slot.slot_id], PAGE_SIZE,
                                   slot.buffer_page_id * PAGE_SIZE));
           slot.is_dirty = false;
         }
@@ -466,10 +548,11 @@ namespace norb {
       fconfig.seekp(0, std::ios::beg);
       pma_config temp{current_pages_in_disk, max_page_size_};
       filesystem::binary_write(fconfig, temp);
-      fconfig.close();
       co_return;
     }
 
+
+    //should not be called inside a coroutine. BEST PRACTICE: call only in the main event loop
     void poll() {
       fmemory.handle_completions();
     }
@@ -477,9 +560,10 @@ namespace norb {
     // should always manually call flush_all before destruction, it doesn't
     // automatically flush for some reason
     ~PersistentMemoryAsync() {
-      if (fconfig.is_open()) {
-        fconfig.close();
-      }
+      fconfig.seekp(0, std::ios::beg);
+      pma_config temp{current_pages_in_disk, max_page_size_};
+      filesystem::binary_write(fconfig, temp);
+      fconfig.close();
     }
 
   public:

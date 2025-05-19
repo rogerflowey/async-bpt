@@ -7,14 +7,21 @@
 #include <optional>     // For SharedState value
 #include <vector>       // For SharedState continuations
 #include <memory>       // For std::shared_ptr
-#include <iostream>     // For debug cout/cerr
+#include <iostream>     // For std::cout, std::cerr, std::endl, std::left
 #include <atomic>       // For unique IDs
-#include <iomanip>      // For std::setw, std::left for aligned logging (optional)
+#include <iomanip>      // For std::setw for aligned logging
+#include <string>       // For std::to_string
+//#define TASK_DEBUG
 
-// Helper for consistent logging prefix
-#define LOG_PREFIX_WIDTH 25 // Adjust as needed
-#define LOG_DEBUG std::cout << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | "
-#define LOG_WARN  std::cerr << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | WARN: "
+#define LOG_PREFIX_WIDTH 35
+
+#define TASK_DEBUG false
+
+#define LOG_DEBUG if(TASK_DEBUG) std::cout << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | "
+
+
+// LOG_WARN and LOG_CRITICAL are not affected by TASK_DEBUG and always print to std::cerr.
+#define LOG_WARN if(TASK_DEBUG) std::cerr << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | WARN: "
 #define LOG_CRITICAL std::cerr << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | CRITICAL: "
 
 
@@ -42,33 +49,53 @@ namespace detail {
     std::exception_ptr exception_ptr_ = nullptr;
 
     PromiseBase() : promise_id_(g_promise_id_counter++) {
-        LOG_DEBUG << "PromiseID: " << promise_id_ << ", PromiseAddr: " << this << " constructed." << std::endl;
+        LOG_DEBUG << "PromiseID: " << promise_id_ << ", PromiseAddr: " << static_cast<void*>(this) << " constructed." << std::endl;
     }
 
-    // Prevent copying/moving of promise base if it's ever attempted directly
     PromiseBase(const PromiseBase&) = delete;
     PromiseBase& operator=(const PromiseBase&) = delete;
     PromiseBase(PromiseBase&&) = delete;
     PromiseBase& operator=(PromiseBase&&) = delete;
 
-    // MODIFICATION: Use suspend_never for eager start
+    ~PromiseBase() {
+        LOG_DEBUG << "PromiseID: " << promise_id_ << ", PromiseAddr: " << static_cast<void*>(this) << " destructed." << std::endl;
+    }
+
     std::suspend_never initial_suspend() noexcept {
-        LOG_DEBUG << "PromiseID: " << promise_id_ << ", PromiseAddr: " << this << " initial_suspend (eager)." << std::endl;
+        LOG_DEBUG << "PromiseID: " << promise_id_ << ", PromiseAddr: " << static_cast<void*>(this) << " initial_suspend (eager)." << std::endl;
         return {};
     }
 
-    std::suspend_always final_suspend() noexcept {
-      LOG_DEBUG << "PromiseID: " << promise_id_ << ", PromiseAddr: " << this << " final_suspend. Continuation: "
-                << (continuation_ ? continuation_.address() : nullptr) << std::endl;
-      if (continuation_) {
-        LOG_DEBUG << "PromiseID: " << promise_id_ << " resuming continuation " << continuation_.address() << std::endl;
-        continuation_.resume();
-      }
-      return {};
+    struct FinalAwaiter {
+        PromiseBase<T>* promise_ptr_;
+        bool await_ready() const noexcept {
+            LOG_DEBUG << "PromiseID: " << promise_ptr_->promise_id_ << " FinalAwaiter::await_ready. Always false to suspend." << std::endl;
+            return false;
+        }
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<> /*h*/) const noexcept {
+            LOG_DEBUG << "PromiseID: " << promise_ptr_->promise_id_ << " FinalAwaiter::await_suspend. Continuation: "
+                      << (promise_ptr_->continuation_ ? promise_ptr_->continuation_.address() : nullptr) << std::endl;
+            if (promise_ptr_->continuation_) {
+                LOG_DEBUG << "PromiseID: " << promise_ptr_->promise_id_ << " resuming continuation " << promise_ptr_->continuation_.address() << std::endl;
+                return promise_ptr_->continuation_; // Resume continuation
+            }
+            LOG_DEBUG << "PromiseID: " << promise_ptr_->promise_id_ << " no continuation to resume. Suspending (no-op)." << std::endl;
+            return std::noop_coroutine(); // No continuation, suspend (frame will be destroyed by Task destructor)
+        }
+        void await_resume() const noexcept {
+            LOG_DEBUG << "PromiseID: " << promise_ptr_->promise_id_ << " FinalAwaiter::await_resume (should not be called if await_suspend returns a handle)." << std::endl;
+        }
+    };
+
+
+    FinalAwaiter final_suspend() noexcept {
+      LOG_DEBUG << "PromiseID: " << promise_id_ << ", PromiseAddr: " << static_cast<void*>(this) << " final_suspend. Will return FinalAwaiter." << std::endl;
+      return {this};
     }
+
     void unhandled_exception() {
       exception_ptr_ = std::current_exception();
-      LOG_WARN << "PromiseID: " << promise_id_ << ", PromiseAddr: " << this << " unhandled_exception captured." << std::endl;
+      LOG_WARN << "PromiseID: " << promise_id_ << ", PromiseAddr: " << static_cast<void*>(this) << " unhandled_exception captured."<<exception_ptr_.__cxa_exception_type() << std::endl;
     }
   };
 
@@ -76,32 +103,34 @@ namespace detail {
   struct PromiseWithValue : PromiseBase<T> {
     std::optional<T> result_opt_;
 
-    Task<T> get_return_object(); // Declaration below
+    Task<T> get_return_object();
     void return_value(T value) {
-        LOG_DEBUG << "PromiseID: " << this->promise_id_ << ", PromiseAddr: " << this << " return_value set." << std::endl;
+        LOG_DEBUG << "PromiseID: " << this->promise_id_ << ", PromiseAddr: " << static_cast<void*>(this) << " return_value set." << std::endl;
         result_opt_.emplace(std::move(value));
     }
     T get_result() {
-        LOG_DEBUG << "PromiseID: " << this->promise_id_ << ", PromiseAddr: " << this << " get_result called." << std::endl;
+        LOG_DEBUG << "PromiseID: " << this->promise_id_ << ", PromiseAddr: " << static_cast<void*>(this) << " get_result called." << std::endl;
         if (this->exception_ptr_) {
             LOG_DEBUG << "PromiseID: " << this->promise_id_ << " rethrowing exception." << std::endl;
             std::rethrow_exception(this->exception_ptr_);
         }
         if (!result_opt_.has_value()) {
             LOG_CRITICAL << "PromiseID: " << this->promise_id_ << " result not set before get_result!" << std::endl;
-            throw std::runtime_error("Promise result not set before get_result");
+            throw std::runtime_error("Promise result not set before get_result for PromiseID: " + std::to_string(this->promise_id_));
         }
-        return std::move(result_opt_.value()); // Move out the value
+        T result = std::move(result_opt_.value());
+        result_opt_.reset();
+        return result;
     }
   };
 
   struct PromiseForVoidSpecial : public PromiseBase<void> {
-    Task<void> get_return_object(); // Declaration below
+    Task<void> get_return_object();
     void return_void() {
-      LOG_DEBUG << "PromiseID: " << this->promise_id_ << ", PromiseAddr: " << this << " return_void." << std::endl;
+      LOG_DEBUG << "PromiseID: " << this->promise_id_ << ", PromiseAddr: " << static_cast<void*>(this) << " return_void." << std::endl;
     }
     void get_result() {
-        LOG_DEBUG << "PromiseID: " << this->promise_id_ << ", PromiseAddr: " << this << " get_result (void) called." << std::endl;
+        LOG_DEBUG << "PromiseID: " << this->promise_id_ << ", PromiseAddr: " << static_cast<void*>(this) << " get_result (void) called." << std::endl;
         if (this->exception_ptr_) {
             LOG_DEBUG << "PromiseID: " << this->promise_id_ << " rethrowing exception." << std::endl;
             std::rethrow_exception(this->exception_ptr_);
@@ -119,33 +148,38 @@ struct Task {
     std::coroutine_handle<promise_type> handle;
 
     explicit Task(std::coroutine_handle<promise_type> h) : handle(h) {
-        LOG_DEBUG << "TaskObj: " << this << " constructed. Manages Handle: " << (handle ? handle.address() : nullptr)
-                  << ", PromiseID: " << (handle ? handle.promise().promise_id_ : -1) // Use -1 or similar for null handle case
-                  << ", PromiseAddr: " << (handle ? (void*)&handle.promise() : nullptr) << std::endl;
+        LOG_DEBUG << "TaskObj<T>: " << static_cast<void*>(this) << " constructed. Manages Handle: " << (handle ? handle.address() : nullptr)
+                  << ", PromiseID: " << (handle ? handle.promise().promise_id_ : -1ull)
+                  << ", PromiseAddr: " << (handle ? static_cast<void*>(&handle.promise()) : nullptr) << std::endl;
     }
 
+    Task(const Task&) = delete;
+    Task& operator=(const Task&) = delete;
+
     Task(Task&& other) noexcept : handle(std::exchange(other.handle, nullptr)) {
-        LOG_DEBUG << "TaskObj: " << this << " move constructed from TaskObj: " << &other
+        LOG_DEBUG << "TaskObj<T>: " << static_cast<void*>(this) << " move constructed from TaskObj: " << static_cast<void*>(&other)
                   << ". New Handle: " << (handle ? handle.address() : nullptr)
-                  << ", Old TaskObj " << &other << " now has null handle." << std::endl;
+                  << (handle ? " (PromiseID: " + std::to_string(handle.promise().promise_id_) + ")" : "")
+                  << ". Old TaskObj " << static_cast<void*>(&other) << " now has null handle." << std::endl;
     }
     Task& operator=(Task&& other) noexcept {
-        LOG_DEBUG << "TaskObj: " << this << " move assigned from TaskObj: " << &other << std::endl;
+        LOG_DEBUG << "TaskObj<T>: " << static_cast<void*>(this) << " move assigned from TaskObj: " << static_cast<void*>(&other) << std::endl;
         if (this != &other) {
-            if (handle) { // If current task holds a handle, it will be destroyed
-                 LOG_WARN << "TaskObj: " << this << " (move assignment) destroying its existing Handle: "
-                          << handle.address() << " (PromiseID: " << handle.promise().promise_id_ << ")" << std::endl;
-                 // This implicit destruction needs careful thought. Usually, a Task is awaited or explicitly managed.
-                 // If this task was not 'done', its destruction here is problematic.
-                 if (!handle.done()) {
-                    LOG_CRITICAL << "TaskObj: " << this << " (move assignment) destroying UNDONE Handle: "
-                                 << handle.address() << " (PromiseID: " << handle.promise().promise_id_ << ")" << std::endl;
+            if (handle) {
+                 uint64_t old_promise_id = handle.promise().promise_id_;
+                 bool old_is_done = handle.done();
+                 //LOG_WARN  << "TaskObj<T>: " << static_cast<void*>(this) << " (move assignment) destroying its existing Handle: "
+                 //          << handle.address() << " (PromiseID: " << old_promise_id << ", Done: " << std::boolalpha << old_is_done << ")" << std::endl;
+                 if (!old_is_done) {
+                    LOG_CRITICAL << "TaskObj<T>: " << static_cast<void*>(this) << " (move assignment) destroying UNDONE Handle: "
+                                 << handle.address() << " (PromiseID: " << old_promise_id << ")" << std::endl;
                  }
                  handle.destroy();
             }
             handle = std::exchange(other.handle, nullptr);
             LOG_DEBUG << "  New Handle: " << (handle ? handle.address() : nullptr)
-                      << ", Old TaskObj " << &other << " now has null handle." << std::endl;
+                      << (handle ? " (PromiseID: " + std::to_string(handle.promise().promise_id_) + ")" : "")
+                      << ". Old TaskObj " << static_cast<void*>(&other) << " now has null handle." << std::endl;
         }
         return *this;
     }
@@ -154,62 +188,51 @@ struct Task {
     ~Task() {
         if (handle) {
             bool is_done = handle.done();
-            auto* promise_ptr = (void*)&handle.promise();
+            auto* promise_ptr = static_cast<void*>(&handle.promise());
             uint64_t promise_id = handle.promise().promise_id_;
 
-            LOG_DEBUG << "TaskObj: " << this << " destroying. Manages Handle: " << handle.address()
+            LOG_DEBUG << "TaskObj<T>: " << static_cast<void*>(this) << " destroying. Manages Handle: " << handle.address()
                       << ", PromiseID: " << promise_id
                       << ", PromiseAddr: " << promise_ptr
                       << ", Done: " << std::boolalpha << is_done << std::endl;
 
             if (!is_done) {
-                LOG_CRITICAL << "TaskObj: " << this << " destroying Handle " << handle.address()
+                LOG_CRITICAL << "TaskObj<T>: " << static_cast<void*>(this) << " destroying Handle " << handle.address()
                              << " (PromiseID: " << promise_id << ", PromiseAddr: " << promise_ptr << ")"
-                             << " for a coroutine that is NOT DONE. This will lead to a crash if the coroutine was suspended on async I/O." << std::endl;
-                // Consider std::terminate() here if this is an unrecoverable state for your app
+                             << " for a coroutine that is NOT DONE." << std::endl;
             }
-
-            if (is_done && handle.promise().continuation_ == nullptr) {
-                 LOG_DEBUG << "  Handle " << handle.address() << " (PromiseID: " << promise_id
-                           << ") was done and its continuation was nullptr (e.g., top-level task or not awaited by wutong::Task)." << std::endl;
-            }
-            
             LOG_DEBUG << "  Calling handle.destroy() for Handle: " << handle.address() << " (PromiseID: " << promise_id << ")" << std::endl;
             handle.destroy();
             LOG_DEBUG << "  handle.destroy() returned for Handle: " << handle.address() << " (PromiseID: " << promise_id << ")" << std::endl;
 
         } else {
-            LOG_DEBUG << "TaskObj: " << this << " destroying. Handle is null (normal for moved-from Task)." << std::endl;
+            LOG_DEBUG << "TaskObj<T>: " << static_cast<void*>(this) << " destroying. Handle is null (normal for moved-from Task)." << std::endl;
         }
     }
 
-    void start() { /* Eager start makes this less critical */ }
-
     bool await_ready() const noexcept {
       bool ready = !handle || handle.done();
-      LOG_DEBUG << "TaskObj: " << this << " await_ready() called. Handle: " << (handle ? handle.address() : nullptr)
-                << (handle ? ", PromiseID: " + std::to_string(handle.promise().promise_id_) : "")
-                << ". Ready: " << std::boolalpha << ready << std::endl;
+      LOG_DEBUG << "TaskObj<T>: " << static_cast<const void*>(this) << " await_ready() called. Handle: " << (handle ? handle.address() : nullptr)
+                << (handle ? " (PromiseID: " + std::to_string(handle.promise().promise_id_) + ", Done: " + (handle.done() ? "true" : "false") + ")" : "")
+                << ". Returning: " << std::boolalpha << ready << std::endl;
       return ready;
     }
 
     bool await_suspend(std::coroutine_handle<> awaiting_coroutine) noexcept {
-      LOG_DEBUG << "TaskObj: " << this << " await_suspend() called by awaiting_coro: " << awaiting_coroutine.address()
+      LOG_DEBUG << "TaskObj<T>: " << static_cast<void*>(this) << " await_suspend() by awaiting_coro: " << awaiting_coroutine.address()
                 << ". My Handle: " << handle.address() << " (PromiseID: " << handle.promise().promise_id_ << ")" << std::endl;
+
       handle.promise().continuation_ = awaiting_coroutine;
-      if (handle.done()) {
-          LOG_DEBUG << "  My Handle " << handle.address() << " is already done. Returning false (don't suspend awaiter)." << std::endl;
-          return false; 
-      }
-      LOG_DEBUG << "  My Handle " << handle.address() << " is not done. Returning true (suspend awaiter)." << std::endl;
-      return true; 
+      LOG_DEBUG << "  Set continuation. My Handle " << handle.address() << " is " << (handle.done() ? "done" : "not done")
+                << ". Returning true (suspend awaiter, will be resumed by my final_suspend)." << std::endl;
+      return true;
     }
 
     T await_resume() {
-      LOG_DEBUG << "TaskObj: " << this << " await_resume() called. My Handle: " << (handle ? handle.address() : nullptr)
-                << (handle ? ", PromiseID: " + std::to_string(handle.promise().promise_id_) : "") << std::endl;
+      LOG_DEBUG << "TaskObj<T>: " << static_cast<void*>(this) << " await_resume() called. My Handle: " << (handle ? handle.address() : nullptr)
+                << (handle ? " (PromiseID: " + std::to_string(handle.promise().promise_id_) + ")" : "") << std::endl;
       if (!handle) {
-        LOG_CRITICAL << "TaskObj: " << this << " Awaiting a moved-from or null Task!" << std::endl;
+        LOG_CRITICAL << "TaskObj<T>: " << static_cast<void*>(this) << " Awaiting a moved-from or null Task!" << std::endl;
         throw std::runtime_error("Awaiting a moved-from or null Task");
       }
       return handle.promise().get_result();
@@ -224,30 +247,38 @@ struct Task<void> {
     std::coroutine_handle<promise_type> handle;
 
     explicit Task(std::coroutine_handle<promise_type> h) : handle(h) {
-        LOG_DEBUG << "TaskObj<void>: " << this << " constructed. Manages Handle: " << (handle ? handle.address() : nullptr)
-                  << ", PromiseID: " << (handle ? handle.promise().promise_id_ : -1)
-                  << ", PromiseAddr: " << (handle ? (void*)&handle.promise() : nullptr) << std::endl;
+        LOG_DEBUG << "TaskObj<void>: " << static_cast<void*>(this) << " constructed. Manages Handle: " << (handle ? handle.address() : nullptr)
+                  << ", PromiseID: " << (handle ? handle.promise().promise_id_ : -1ull)
+                  << ", PromiseAddr: " << (handle ? static_cast<void*>(&handle.promise()) : nullptr) << std::endl;
     }
+
+    Task(const Task&) = delete;
+    Task& operator=(const Task&) = delete;
+
     Task(Task&& other) noexcept : handle(std::exchange(other.handle, nullptr)) {
-        LOG_DEBUG << "TaskObj<void>: " << this << " move constructed from TaskObj: " << &other
+        LOG_DEBUG << "TaskObj<void>: " << static_cast<void*>(this) << " move constructed from TaskObj: " << static_cast<void*>(&other)
                   << ". New Handle: " << (handle ? handle.address() : nullptr)
-                  << ", Old TaskObj " << &other << " now has null handle." << std::endl;
+                  << (handle ? " (PromiseID: " + std::to_string(handle.promise().promise_id_) + ")" : "")
+                  << ". Old TaskObj " << static_cast<void*>(&other) << " now has null handle." << std::endl;
     }
      Task& operator=(Task&& other) noexcept {
-        LOG_DEBUG << "TaskObj<void>: " << this << " move assigned from TaskObj: " << &other << std::endl;
+        LOG_DEBUG << "TaskObj<void>: " << static_cast<void*>(this) << " move assigned from TaskObj: " << static_cast<void*>(&other) << std::endl;
         if (this != &other) {
             if (handle) {
-                 LOG_WARN << "TaskObj<void>: " << this << " (move assignment) destroying its existing Handle: "
-                          << handle.address() << " (PromiseID: " << handle.promise().promise_id_ << ")" << std::endl;
-                 if (!handle.done()) {
-                    LOG_CRITICAL << "TaskObj<void>: " << this << " (move assignment) destroying UNDONE Handle: "
-                                 << handle.address() << " (PromiseID: " << handle.promise().promise_id_ << ")" << std::endl;
+                 uint64_t old_promise_id = handle.promise().promise_id_;
+                 bool old_is_done = handle.done();
+                 LOG_WARN  << "TaskObj<void>: " << static_cast<void*>(this) << " (move assignment) destroying its existing Handle: "
+                           << handle.address() << " (PromiseID: " << old_promise_id << ", Done: " << std::boolalpha << old_is_done << ")" << std::endl;
+                 if (!old_is_done) {
+                    LOG_CRITICAL << "TaskObj<void>: " << static_cast<void*>(this) << " (move assignment) destroying UNDONE Handle: "
+                                 << handle.address() << " (PromiseID: " << old_promise_id << ")" << std::endl;
                  }
                  handle.destroy();
             }
             handle = std::exchange(other.handle, nullptr);
             LOG_DEBUG << "  New Handle: " << (handle ? handle.address() : nullptr)
-                      << ", Old TaskObj " << &other << " now has null handle." << std::endl;
+                      << (handle ? " (PromiseID: " + std::to_string(handle.promise().promise_id_) + ")" : "")
+                      << ". Old TaskObj " << static_cast<void*>(&other) << " now has null handle." << std::endl;
         }
         return *this;
     }
@@ -255,59 +286,51 @@ struct Task<void> {
     ~Task() {
         if (handle) {
             bool is_done = handle.done();
-            auto* promise_ptr = (void*)&handle.promise();
+            auto* promise_ptr = static_cast<void*>(&handle.promise());
             uint64_t promise_id = handle.promise().promise_id_;
 
-            LOG_DEBUG << "TaskObj<void>: " << this << " destroying. Manages Handle: " << handle.address()
+            LOG_DEBUG << "TaskObj<void>: " << static_cast<void*>(this) << " destroying. Manages Handle: " << handle.address()
                       << ", PromiseID: " << promise_id
                       << ", PromiseAddr: " << promise_ptr
                       << ", Done: " << std::boolalpha << is_done << std::endl;
 
             if (!is_done) {
-                 LOG_CRITICAL << "TaskObj<void>: " << this << " destroying Handle " << handle.address()
+                 LOG_CRITICAL << "TaskObj<void>: " << static_cast<void*>(this) << " destroying Handle " << handle.address()
                              << " (PromiseID: " << promise_id << ", PromiseAddr: " << promise_ptr << ")"
-                             << " for a coroutine that is NOT DONE. This will lead to a crash if the coroutine was suspended on async I/O." << std::endl;
-            }
-            if (is_done && handle.promise().continuation_ == nullptr) {
-                 LOG_DEBUG << "  Handle " << handle.address() << " (PromiseID: " << promise_id
-                           << ") was done and its continuation was nullptr." << std::endl;
+                             << " for a coroutine that is NOT DONE." << std::endl;
             }
 
             LOG_DEBUG << "  Calling handle.destroy() for Handle: " << handle.address() << " (PromiseID: " << promise_id << ")" << std::endl;
             handle.destroy();
             LOG_DEBUG << "  handle.destroy() returned for Handle: " << handle.address() << " (PromiseID: " << promise_id << ")" << std::endl;
         } else {
-            LOG_DEBUG << "TaskObj<void>: " << this << " destroying. Handle is null (normal for moved-from Task)." << std::endl;
+            LOG_DEBUG << "TaskObj<void>: " << static_cast<void*>(this) << " destroying. Handle is null (normal for moved-from Task)." << std::endl;
         }
     }
 
-    void start() { /* Eager start makes this less critical */ }
-
     bool await_ready() const noexcept {
       bool ready = !handle || handle.done();
-      LOG_DEBUG << "TaskObj<void>: " << this << " await_ready() called. Handle: " << (handle ? handle.address() : nullptr)
-                << (handle ? ", PromiseID: " + std::to_string(handle.promise().promise_id_) : "")
-                << ". Ready: " << std::boolalpha << ready << std::endl;
+      LOG_DEBUG << "TaskObj<void>: " << static_cast<const void*>(this) << " await_ready() called. Handle: " << (handle ? handle.address() : nullptr)
+                << (handle ? " (PromiseID: " + std::to_string(handle.promise().promise_id_) + ", Done: " + (handle.done() ? "true" : "false") + ")" : "")
+                << ". Returning: " << std::boolalpha << ready << std::endl;
       return ready;
     }
 
     bool await_suspend(std::coroutine_handle<> awaiting_coroutine) noexcept {
-      LOG_DEBUG << "TaskObj<void>: " << this << " await_suspend() called by awaiting_coro: " << awaiting_coroutine.address()
+      LOG_DEBUG << "TaskObj<void>: " << static_cast<void*>(this) << " await_suspend() by awaiting_coro: " << awaiting_coroutine.address()
                 << ". My Handle: " << handle.address() << " (PromiseID: " << handle.promise().promise_id_ << ")" << std::endl;
+
       handle.promise().continuation_ = awaiting_coroutine;
-      if (handle.done()) {
-          LOG_DEBUG << "  My Handle " << handle.address() << " is already done. Returning false (don't suspend awaiter)." << std::endl;
-          return false;
-      }
-      LOG_DEBUG << "  My Handle " << handle.address() << " is not done. Returning true (suspend awaiter)." << std::endl;
+      LOG_DEBUG << "  Set continuation. My Handle " << handle.address() << " is " << (handle.done() ? "done" : "not done")
+                << ". Returning true (suspend awaiter, will be resumed by my final_suspend)." << std::endl;
       return true;
     }
 
     void await_resume() {
-      LOG_DEBUG << "TaskObj<void>: " << this << " await_resume() called. My Handle: " << (handle ? handle.address() : nullptr)
-                << (handle ? ", PromiseID: " + std::to_string(handle.promise().promise_id_) : "") << std::endl;
+      LOG_DEBUG << "TaskObj<void>: " << static_cast<void*>(this) << " await_resume() called. My Handle: " << (handle ? handle.address() : nullptr)
+                << (handle ? " (PromiseID: " + std::to_string(handle.promise().promise_id_) + ")" : "") << std::endl;
       if (!handle) {
-        LOG_CRITICAL << "TaskObj<void>: " << this << " Awaiting a moved-from or null Task!" << std::endl;
+        LOG_CRITICAL << "TaskObj<void>: " << static_cast<void*>(this) << " Awaiting a moved-from or null Task!" << std::endl;
         throw std::runtime_error("Awaiting a moved-from or null Task");
       }
       handle.promise().get_result();
@@ -319,14 +342,14 @@ namespace detail {
   template<typename T>
   Task<T> PromiseWithValue<T>::get_return_object() {
     auto coro_handle = std::coroutine_handle<PromiseWithValue<T>>::from_promise(*this);
-    LOG_DEBUG << "PromiseID: " << this->promise_id_ << ", PromiseAddr: " << this
-              << " get_return_object() -> Task for Handle: " << coro_handle.address() << std::endl;
+    LOG_DEBUG << "PromiseID: " << this->promise_id_ << ", PromiseAddr: " << static_cast<void*>(this)
+              << " get_return_object() -> Task<T> for Handle: " << coro_handle.address() << std::endl;
     return Task<T>{coro_handle};
   }
 
   inline Task<void> PromiseForVoidSpecial::get_return_object() {
     auto coro_handle = std::coroutine_handle<PromiseForVoidSpecial>::from_promise(*this);
-    LOG_DEBUG << "PromiseID: " << this->promise_id_ << ", PromiseAddr: " << this
+    LOG_DEBUG << "PromiseID: " << this->promise_id_ << ", PromiseAddr: " << static_cast<void*>(this)
               << " get_return_object() -> Task<void> for Handle: " << coro_handle.address() << std::endl;
     return Task<void>{coro_handle};
   }
@@ -344,11 +367,11 @@ namespace detail {
         std::vector<std::coroutine_handle<>> continuations_;
 
         SharedState() : shared_state_id_(g_shared_state_id_counter++) {
-            LOG_DEBUG << "SharedStateID: " << shared_state_id_ << ", Addr: " << this << " constructed." << std::endl;
+            LOG_DEBUG << "SharedStateID: " << shared_state_id_ << ", Addr: " << static_cast<void*>(this) << " constructed." << std::endl;
         }
         ~SharedState() {
-            LOG_DEBUG << "SharedStateID: " << shared_state_id_ << ", Addr: " << this << " destructed. State: " << (int)current_state_
-                      << ", Continuations: " << continuations_.size() << std::endl;
+            LOG_DEBUG << "SharedStateID: " << shared_state_id_ << ", Addr: " << static_cast<void*>(this) << " destructed. State: " << (int)current_state_
+                      << ", Continuations pending: " << continuations_.size() << std::endl;
         }
 
 
@@ -358,11 +381,16 @@ namespace detail {
                 value_ = std::move(val);
                 current_state_ = State::VALUE;
                 LOG_DEBUG << "  Resuming " << continuations_.size() << " continuations." << std::endl;
-                for (auto& h : continuations_) { if (h) {
-                    LOG_DEBUG << "    Resuming continuation " << h.address() << std::endl;
-                    h.resume();
-                }}
+                for (int i=continuations_.size()-1;i>=0;--i) {
+                    auto &h = continuations_[i];
+                    if (h) {
+                        LOG_DEBUG << "    Resuming continuation " << h.address() << std::endl;
+                        h.resume();
+                    }
+                }
                 continuations_.clear();
+            } else {
+                LOG_WARN << "SharedStateID: " << shared_state_id_ << " set_value() called but state is not PENDING (" << (int)current_state_ << ")" << std::endl;
             }
         }
         void set_exception(std::exception_ptr ex) {
@@ -376,6 +404,8 @@ namespace detail {
                     h.resume();
                 }}
                 continuations_.clear();
+            } else {
+                 LOG_WARN << "SharedStateID: " << shared_state_id_ << " set_exception() called but state is not PENDING (" << (int)current_state_ << ")" << std::endl;
             }
         }
         bool add_continuation_and_check_state(std::coroutine_handle<> awaiting_coro) {
@@ -383,11 +413,11 @@ namespace detail {
                       << ". Current state: " << (int)current_state_ << std::endl;
             if (current_state_ != State::PENDING) {
                 LOG_DEBUG << "  Already completed. Returning false (don't suspend)." << std::endl;
-                return false; 
+                return false;
             }
             continuations_.push_back(awaiting_coro);
-            LOG_DEBUG << "  Pending. Added continuation. Returning true (suspend)." << std::endl;
-            return true; 
+            LOG_DEBUG << "  Pending. Added continuation (total: " << continuations_.size() << "). Returning true (suspend)." << std::endl;
+            return true;
         }
         T get_value_or_rethrow() {
             LOG_DEBUG << "SharedStateID: " << shared_state_id_ << " get_value_or_rethrow(). Current state: " << (int)current_state_ << std::endl;
@@ -395,11 +425,11 @@ namespace detail {
                 LOG_DEBUG << "  Rethrowing exception." << std::endl;
                 std::rethrow_exception(exception_ptr_);
             }
-            if (!value_) { // Should ideally be checked by current_state_ == State::VALUE
-                 LOG_CRITICAL << "SharedStateID: " << shared_state_id_ << " get_value_or_rethrow() called but no value and no exception!" << std::endl;
-                 throw std::runtime_error("SharedState value not set and no exception");
+            if (current_state_ != State::VALUE || !value_) {
+                 LOG_CRITICAL << "SharedStateID: " << shared_state_id_ << " get_value_or_rethrow() called but state is not VALUE or value_ is not set! State: " << (int)current_state_ << std::endl;
+                 throw std::runtime_error("SharedState value not set and no exception for SharedStateID: " + std::to_string(shared_state_id_));
             }
-            return *value_; // For T where T might be non-copyable, consider returning T& or T&& if value_ is std::move'd out
+            return *value_;
         }
     };
 
@@ -411,11 +441,11 @@ namespace detail {
         std::vector<std::coroutine_handle<>> continuations_;
 
         SharedState() : shared_state_id_(g_shared_state_id_counter++) {
-            LOG_DEBUG << "SharedStateID<void>: " << shared_state_id_ << ", Addr: " << this << " constructed." << std::endl;
+            LOG_DEBUG << "SharedStateID<void>: " << shared_state_id_ << ", Addr: " << static_cast<void*>(this) << " constructed." << std::endl;
         }
         ~SharedState() {
-            LOG_DEBUG << "SharedStateID<void>: " << shared_state_id_ << ", Addr: " << this << " destructed. State: " << (int)current_state_
-                      << ", Continuations: " << continuations_.size() << std::endl;
+            LOG_DEBUG << "SharedStateID<void>: " << shared_state_id_ << ", Addr: " << static_cast<void*>(this) << " destructed. State: " << (int)current_state_
+                      << ", Continuations pending: " << continuations_.size() << std::endl;
         }
 
         void set_completed() {
@@ -428,6 +458,8 @@ namespace detail {
                     h.resume();
                 }}
                 continuations_.clear();
+            } else {
+                LOG_WARN << "SharedStateID<void>: " << shared_state_id_ << " set_completed() called but state is not PENDING (" << (int)current_state_ << ")" << std::endl;
             }
         }
         void set_exception(std::exception_ptr ex) {
@@ -441,6 +473,8 @@ namespace detail {
                     h.resume();
                 }}
                 continuations_.clear();
+            } else {
+                LOG_WARN << "SharedStateID<void>: " << shared_state_id_ << " set_exception() called but state is not PENDING (" << (int)current_state_ << ")" << std::endl;
             }
         }
         bool add_continuation_and_check_state(std::coroutine_handle<> awaiting_coro) {
@@ -451,7 +485,7 @@ namespace detail {
                 return false;
             }
             continuations_.push_back(awaiting_coro);
-            LOG_DEBUG << "  Pending. Added continuation. Returning true (suspend)." << std::endl;
+            LOG_DEBUG << "  Pending. Added continuation (total: " << continuations_.size() << "). Returning true (suspend)." << std::endl;
             return true;
         }
         void get_value_or_rethrow() {
@@ -460,30 +494,40 @@ namespace detail {
                 LOG_DEBUG << "  Rethrowing exception." << std::endl;
                 std::rethrow_exception(exception_ptr_);
             }
+            if (current_state_ != State::COMPLETED) {
+                 LOG_CRITICAL << "SharedStateID<void>: " << shared_state_id_ << " get_value_or_rethrow() called but state is not COMPLETED and no exception! State: " << (int)current_state_ << std::endl;
+                 throw std::runtime_error("SharedState<void> not completed and no exception for SharedStateID: " + std::to_string(shared_state_id_));
+            }
         }
     };
 
     template <typename T>
     struct SharedTaskPromise {
-        uint64_t promise_id_; // Unique ID for this promise instance
+        uint64_t promise_id_;
         std::shared_ptr<SharedState<T>> shared_state_ptr_;
 
         SharedTaskPromise() : promise_id_(g_promise_id_counter++), shared_state_ptr_(std::make_shared<SharedState<T>>()) {
-            LOG_DEBUG << "SharedTaskPromiseID: " << promise_id_ << ", PromiseAddr: " << this 
+            LOG_DEBUG << "SharedTaskPromiseID: " << promise_id_ << ", PromiseAddr: " << static_cast<void*>(this)
                       << " constructed. Owns SharedStateID: " << shared_state_ptr_->shared_state_id_
-                      << ", SharedStateAddr: " << shared_state_ptr_.get() << std::endl;
+                      << ", SharedStateAddr: " << static_cast<void*>(shared_state_ptr_.get()) << std::endl;
+        }
+        ~SharedTaskPromise() {
+             LOG_DEBUG << "SharedTaskPromiseID: " << promise_id_ << ", PromiseAddr: " << static_cast<void*>(this)
+                      << " destructed. SharedStateID: " << shared_state_ptr_->shared_state_id_
+                      << " (use_count: " << shared_state_ptr_.use_count() << ")" << std::endl;
         }
 
-        SharedTask<T> get_return_object(); // Declaration
+
+        SharedTask<T> get_return_object();
 
         std::suspend_never initial_suspend() noexcept {
             LOG_DEBUG << "SharedTaskPromiseID: " << promise_id_ << " initial_suspend (eager)." << std::endl;
             return {};
         }
         std::suspend_never final_suspend() noexcept {
-            LOG_DEBUG << "SharedTaskPromiseID: " << promise_id_ << ", PromiseAddr: " << this
+            LOG_DEBUG << "SharedTaskPromiseID: " << promise_id_ << ", PromiseAddr: " << static_cast<void*>(this)
                       << " final_suspend (suspend_never). Coro frame will be destroyed. SharedState (ID "
-                      << shared_state_ptr_->shared_state_id_ << ", Addr " << shared_state_ptr_.get()
+                      << shared_state_ptr_->shared_state_id_ << ", Addr " << static_cast<void*>(shared_state_ptr_.get())
                       << ") lives on via shared_ptr (use_count: " << shared_state_ptr_.use_count() << ")." << std::endl;
             return {};
         }
@@ -505,21 +549,26 @@ namespace detail {
         std::shared_ptr<SharedState<void>> shared_state_ptr_;
 
         SharedTaskPromise() : promise_id_(g_promise_id_counter++), shared_state_ptr_(std::make_shared<SharedState<void>>()) {
-            LOG_DEBUG << "SharedTaskPromiseID<void>: " << promise_id_ << ", PromiseAddr: " << this 
+            LOG_DEBUG << "SharedTaskPromiseID<void>: " << promise_id_ << ", PromiseAddr: " << static_cast<void*>(this)
                       << " constructed. Owns SharedStateID: " << shared_state_ptr_->shared_state_id_
-                      << ", SharedStateAddr: " << shared_state_ptr_.get() << std::endl;
+                      << ", SharedStateAddr: " << static_cast<void*>(shared_state_ptr_.get()) << std::endl;
+        }
+        ~SharedTaskPromise() {
+             LOG_DEBUG << "SharedTaskPromiseID<void>: " << promise_id_ << ", PromiseAddr: " << static_cast<void*>(this)
+                      << " destructed. SharedStateID: " << shared_state_ptr_->shared_state_id_
+                      << " (use_count: " << shared_state_ptr_.use_count() << ")" << std::endl;
         }
 
-        SharedTask<void> get_return_object(); // Declaration
+        SharedTask<void> get_return_object();
 
         std::suspend_never initial_suspend() noexcept {
             LOG_DEBUG << "SharedTaskPromiseID<void>: " << promise_id_ << " initial_suspend (eager)." << std::endl;
             return {};
         }
         std::suspend_never final_suspend() noexcept {
-            LOG_DEBUG << "SharedTaskPromiseID<void>: " << promise_id_ << ", PromiseAddr: " << this
+            LOG_DEBUG << "SharedTaskPromiseID<void>: " << promise_id_ << ", PromiseAddr: " << static_cast<void*>(this)
                       << " final_suspend (suspend_never). Coro frame will be destroyed. SharedState (ID "
-                      << shared_state_ptr_->shared_state_id_ << ", Addr " << shared_state_ptr_.get()
+                      << shared_state_ptr_->shared_state_id_ << ", Addr " << static_cast<void*>(shared_state_ptr_.get())
                       << ") lives on via shared_ptr (use_count: " << shared_state_ptr_.use_count() << ")." << std::endl;
             return {};
         }
@@ -543,81 +592,80 @@ class SharedTask {
     std::shared_ptr<detail::SharedState<T>> state_;
 
 public:
-    SharedTask() = default; // Creates a SharedTask with null state_
+    using promise_type = detail::SharedTaskPromise<T>;
+
+    SharedTask() = default;
     explicit SharedTask(std::shared_ptr<detail::SharedState<T>> state) : state_(std::move(state)) {
-        LOG_DEBUG << "SharedTaskObj: " << this << " constructed. Points to SharedStateID: "
-                  << (state_ ? state_->shared_state_id_ : -1) << ", Addr: " << (state_ ? state_.get() : nullptr) << std::endl;
+        LOG_DEBUG << "SharedTaskObj<T>: " << static_cast<void*>(this) << " constructed. Points to SharedStateID: "
+                  << (state_ ? state_->shared_state_id_ : -1ull) << ", Addr: " << (state_ ? static_cast<void*>(state_.get()) : nullptr)
+                  << " (use_count: " << (state_ ? state_.use_count() : 0) << ")" << std::endl;
     }
 
-    // Copy/move ops
     SharedTask(const SharedTask& other) : state_(other.state_) {
-        LOG_DEBUG << "SharedTaskObj: " << this << " copy constructed from SharedTaskObj: " << &other
-                  << ". Points to SharedStateID: " << (state_ ? state_->shared_state_id_ : -1)
-                  << " (use_count: " << state_.use_count() << ")" << std::endl;
+        LOG_DEBUG << "SharedTaskObj<T>: " << static_cast<void*>(this) << " copy constructed from SharedTaskObj: " << static_cast<const void*>(&other)
+                  << ". Points to SharedStateID: " << (state_ ? state_->shared_state_id_ : -1ull)
+                  << " (use_count: " << (state_ ? state_.use_count() : 0) << ")" << std::endl;
     }
     SharedTask& operator=(const SharedTask& other) {
-        LOG_DEBUG << "SharedTaskObj: " << this << " copy assigned from SharedTaskObj: " << &other << std::endl;
+        LOG_DEBUG << "SharedTaskObj<T>: " << static_cast<void*>(this) << " copy assigned from SharedTaskObj: " << static_cast<const void*>(&other) << std::endl;
         if (this != &other) {
             state_ = other.state_;
-            LOG_DEBUG << "  Now points to SharedStateID: " << (state_ ? state_->shared_state_id_ : -1)
-                      << " (use_count: " << state_.use_count() << ")" << std::endl;
+            LOG_DEBUG << "  Now points to SharedStateID: " << (state_ ? state_->shared_state_id_ : -1ull)
+                      << " (use_count: " << (state_ ? state_.use_count() : 0) << ")" << std::endl;
         }
         return *this;
     }
     SharedTask(SharedTask&& other) noexcept : state_(std::move(other.state_)) {
-        LOG_DEBUG << "SharedTaskObj: " << this << " move constructed from SharedTaskObj: " << &other
-                  << ". Points to SharedStateID: " << (state_ ? state_->shared_state_id_ : -1)
-                  << ". other.state_ is now " << (other.state_ ? "valid" : "null") << std::endl;
+        LOG_DEBUG << "SharedTaskObj<T>: " << static_cast<void*>(this) << " move constructed from SharedTaskObj: " << static_cast<void*>(&other)
+                  << ". Points to SharedStateID: " << (state_ ? state_->shared_state_id_ : -1ull)
+                  << ". other.state_ is now " << (other.state_ ? "valid" : "null")
+                  << " (use_count after move: " << (state_ ? state_.use_count() : 0) << ")" << std::endl;
     }
     SharedTask& operator=(SharedTask&& other) noexcept {
-        LOG_DEBUG << "SharedTaskObj: " << this << " move assigned from SharedTaskObj: " << &other << std::endl;
+        LOG_DEBUG << "SharedTaskObj<T>: " << static_cast<void*>(this) << " move assigned from SharedTaskObj: " << static_cast<void*>(&other) << std::endl;
         if (this != &other) {
             state_ = std::move(other.state_);
-            LOG_DEBUG << "  Now points to SharedStateID: " << (state_ ? state_->shared_state_id_ : -1)
-                      << ". other.state_ is now " << (other.state_ ? "valid" : "null") << std::endl;
+            LOG_DEBUG << "  Now points to SharedStateID: " << (state_ ? state_->shared_state_id_ : -1ull)
+                      << ". other.state_ is now " << (other.state_ ? "valid" : "null")
+                      << " (use_count after move: " << (state_ ? state_.use_count() : 0) << ")" << std::endl;
         }
         return *this;
     }
      ~SharedTask() {
-        LOG_DEBUG << "SharedTaskObj: " << this << " destructed. Pointed to SharedStateID: "
-                  << (state_ ? state_->shared_state_id_ : -1)
-                  << " (use_count before this dtor: " << state_.use_count() << ")" << std::endl;
-        // shared_ptr dtor will handle decrementing use_count of state_
+        LOG_DEBUG << "SharedTaskObj<T>: " << static_cast<void*>(this) << " destructed. Pointed to SharedStateID: "
+                  << (state_ ? state_->shared_state_id_ : -1ull)
+                  << " (use_count before this dtor affects it: " << (state_ ? state_.use_count() : 0) << ")" << std::endl;
     }
 
 
     bool await_ready() const noexcept {
         if (!state_) {
-            LOG_WARN << "SharedTaskObj: " << this << " await_ready() on null state. Returning true (ready)." << std::endl;
+            LOG_WARN << "SharedTaskObj<T>: " << static_cast<const void*>(this) << " await_ready() on null state. Returning true (ready)." << std::endl;
             return true;
         }
         bool ready = state_->current_state_ != detail::SharedState<T>::State::PENDING;
-        LOG_DEBUG << "SharedTaskObj: " << this << " (SharedStateID: " << state_->shared_state_id_
-                  << ") await_ready(). State: " << (int)state_->current_state_ << ". Ready: " << std::boolalpha << ready << std::endl;
+        LOG_DEBUG << "SharedTaskObj<T>: " << static_cast<const void*>(this) << " (SharedStateID: " << state_->shared_state_id_
+                  << ") await_ready(). State: " << (int)state_->current_state_ << ". Returning: " << std::boolalpha << ready << std::endl;
         return ready;
     }
 
     bool await_suspend(std::coroutine_handle<> awaiting_coro) noexcept {
         if (!state_) {
-            LOG_WARN << "SharedTaskObj: " << this << " await_suspend() on null state. Returning false (don't suspend)." << std::endl;
-            return false; // Don't suspend if state is null
+            LOG_WARN << "SharedTaskObj<T>: " << static_cast<void*>(this) << " await_suspend() on null state. Returning false (don't suspend)." << std::endl;
+            return false;
         }
-        LOG_DEBUG << "SharedTaskObj: " << this << " (SharedStateID: " << state_->shared_state_id_
+        LOG_DEBUG << "SharedTaskObj<T>: " << static_cast<void*>(this) << " (SharedStateID: " << state_->shared_state_id_
                   << ") await_suspend() by awaiting_coro: " << awaiting_coro.address() << std::endl;
-        return state_->add_continuation_and_check_state(awaiting_coro);
+        bool should_suspend = state_->add_continuation_and_check_state(awaiting_coro);
+        LOG_DEBUG << "  SharedState::add_continuation_and_check_state returned: " << std::boolalpha << should_suspend << ". Returning this value." << std::endl;
+        return should_suspend;
     }
 
     T await_resume() {
-        LOG_DEBUG << "SharedTaskObj: " << this << " await_resume()." << std::endl;
+        LOG_DEBUG << "SharedTaskObj<T>: " << static_cast<void*>(this) << " await_resume()." << std::endl;
         if (!state_) {
-            LOG_CRITICAL << "SharedTaskObj: " << this << " Awaiting a SharedTask with null state!" << std::endl;
-            if constexpr (!std::is_void_v<T>) {
-                 throw std::runtime_error("Awaiting a SharedTask with null state");
-                 // return T{}; // Or throw, depending on desired behavior for this invalid state
-            } else {
-                 throw std::runtime_error("Awaiting a SharedTask<void> with null state");
-                 // return;
-            }
+            LOG_CRITICAL << "SharedTaskObj<T>: " << static_cast<void*>(this) << " Awaiting a SharedTask with null state!" << std::endl;
+            throw std::runtime_error("Awaiting a SharedTask with null state");
         }
         LOG_DEBUG << "  Forwarding to SharedStateID: " << state_->shared_state_id_ << " get_value_or_rethrow()." << std::endl;
         return state_->get_value_or_rethrow();
@@ -625,75 +673,80 @@ public:
 };
 
 template <>
-class SharedTask<void> { // Specialization for void
+class SharedTask<void> {
     std::shared_ptr<detail::SharedState<void>> state_;
 public:
+    using promise_type = detail::SharedTaskPromise<void>;
+
     SharedTask() = default;
     explicit SharedTask(std::shared_ptr<detail::SharedState<void>> state) : state_(std::move(state)) {
-        LOG_DEBUG << "SharedTaskObj<void>: " << this << " constructed. Points to SharedStateID: "
-                  << (state_ ? state_->shared_state_id_ : -1) << ", Addr: " << (state_ ? state_.get() : nullptr) << std::endl;
+        LOG_DEBUG << "SharedTaskObj<void>: " << static_cast<void*>(this) << " constructed. Points to SharedStateID: "
+                  << (state_ ? state_->shared_state_id_ : -1ull) << ", Addr: " << (state_ ? static_cast<void*>(state_.get()) : nullptr)
+                  << " (use_count: " << (state_ ? state_.use_count() : 0) << ")" << std::endl;
     }
-    // Copy/move ops (similar logging as Task<T>)
     SharedTask(const SharedTask& other) : state_(other.state_) {
-        LOG_DEBUG << "SharedTaskObj<void>: " << this << " copy constructed from SharedTaskObj: " << &other
-                  << ". Points to SharedStateID: " << (state_ ? state_->shared_state_id_ : -1)
-                  << " (use_count: " << state_.use_count() << ")" << std::endl;
+        LOG_DEBUG << "SharedTaskObj<void>: " << static_cast<void*>(this) << " copy constructed from SharedTaskObj: " << static_cast<const void*>(&other)
+                  << ". Points to SharedStateID: " << (state_ ? state_->shared_state_id_ : -1ull)
+                  << " (use_count: " << (state_ ? state_.use_count() : 0) << ")" << std::endl;
     }
     SharedTask& operator=(const SharedTask& other) {
-        LOG_DEBUG << "SharedTaskObj<void>: " << this << " copy assigned from SharedTaskObj: " << &other << std::endl;
+        LOG_DEBUG << "SharedTaskObj<void>: " << static_cast<void*>(this) << " copy assigned from SharedTaskObj: " << static_cast<const void*>(&other) << std::endl;
         if (this != &other) {
             state_ = other.state_;
-            LOG_DEBUG << "  Now points to SharedStateID: " << (state_ ? state_->shared_state_id_ : -1)
-                      << " (use_count: " << state_.use_count() << ")" << std::endl;
+            LOG_DEBUG << "  Now points to SharedStateID: " << (state_ ? state_->shared_state_id_ : -1ull)
+                      << " (use_count: " << (state_ ? state_.use_count() : 0) << ")" << std::endl;
         }
         return *this;
     }
     SharedTask(SharedTask&& other) noexcept : state_(std::move(other.state_)) {
-        LOG_DEBUG << "SharedTaskObj<void>: " << this << " move constructed from SharedTaskObj: " << &other
-                  << ". Points to SharedStateID: " << (state_ ? state_->shared_state_id_ : -1)
-                  << ". other.state_ is now " << (other.state_ ? "valid" : "null") << std::endl;
+        LOG_DEBUG << "SharedTaskObj<void>: " << static_cast<void*>(this) << " move constructed from SharedTaskObj: " << static_cast<void*>(&other)
+                  << ". Points to SharedStateID: " << (state_ ? state_->shared_state_id_ : -1ull)
+                  << ". other.state_ is now " << (other.state_ ? "valid" : "null")
+                  << " (use_count after move: " << (state_ ? state_.use_count() : 0) << ")" << std::endl;
     }
     SharedTask& operator=(SharedTask&& other) noexcept {
-        LOG_DEBUG << "SharedTaskObj<void>: " << this << " move assigned from SharedTaskObj: " << &other << std::endl;
+        LOG_DEBUG << "SharedTaskObj<void>: " << static_cast<void*>(this) << " move assigned from SharedTaskObj: " << static_cast<void*>(&other) << std::endl;
         if (this != &other) {
             state_ = std::move(other.state_);
-            LOG_DEBUG << "  Now points to SharedStateID: " << (state_ ? state_->shared_state_id_ : -1)
-                      << ". other.state_ is now " << (other.state_ ? "valid" : "null") << std::endl;
+            LOG_DEBUG << "  Now points to SharedStateID: " << (state_ ? state_->shared_state_id_ : -1ull)
+                      << ". other.state_ is now " << (other.state_ ? "valid" : "null")
+                      << " (use_count after move: " << (state_ ? state_.use_count() : 0) << ")" << std::endl;
         }
         return *this;
     }
      ~SharedTask() {
-        LOG_DEBUG << "SharedTaskObj<void>: " << this << " destructed. Pointed to SharedStateID: "
-                  << (state_ ? state_->shared_state_id_ : -1)
-                  << " (use_count before this dtor: " << state_.use_count() << ")" << std::endl;
+        LOG_DEBUG << "SharedTaskObj<void>: " << static_cast<void*>(this) << " destructed. Pointed to SharedStateID: "
+                  << (state_ ? state_->shared_state_id_ : -1ull)
+                  << " (use_count before this dtor affects it: " << (state_ ? state_.use_count() : 0) << ")" << std::endl;
     }
 
 
     bool await_ready() const noexcept {
         if (!state_) {
-            LOG_WARN << "SharedTaskObj<void>: " << this << " await_ready() on null state. Returning true (ready)." << std::endl;
+            LOG_WARN << "SharedTaskObj<void>: " << static_cast<const void*>(this) << " await_ready() on null state. Returning true (ready)." << std::endl;
             return true;
         }
         bool ready = state_->current_state_ != detail::SharedState<void>::State::PENDING;
-        LOG_DEBUG << "SharedTaskObj<void>: " << this << " (SharedStateID: " << state_->shared_state_id_
-                  << ") await_ready(). State: " << (int)state_->current_state_ << ". Ready: " << std::boolalpha << ready << std::endl;
+        LOG_DEBUG << "SharedTaskObj<void>: " << static_cast<const void*>(this) << " (SharedStateID: " << state_->shared_state_id_
+                  << ") await_ready(). State: " << (int)state_->current_state_ << ". Returning: " << std::boolalpha << ready << std::endl;
         return ready;
     }
     bool await_suspend(std::coroutine_handle<> awaiting_coro) noexcept {
         if (!state_) {
-            LOG_WARN << "SharedTaskObj<void>: " << this << " await_suspend() on null state. Returning false (don't suspend)." << std::endl;
+            LOG_WARN << "SharedTaskObj<void>: " << static_cast<void*>(this) << " await_suspend() on null state. Returning false (don't suspend)." << std::endl;
             return false;
         }
-        LOG_DEBUG << "SharedTaskObj<void>: " << this << " (SharedStateID: " << state_->shared_state_id_
+        LOG_DEBUG << "SharedTaskObj<void>: " << static_cast<void*>(this) << " (SharedStateID: " << state_->shared_state_id_
                   << ") await_suspend() by awaiting_coro: " << awaiting_coro.address() << std::endl;
-        return state_->add_continuation_and_check_state(awaiting_coro);
+        bool should_suspend = state_->add_continuation_and_check_state(awaiting_coro);
+        LOG_DEBUG << "  SharedState::add_continuation_and_check_state returned: " << std::boolalpha << should_suspend << ". Returning this value." << std::endl;
+        return should_suspend;
     }
     void await_resume() {
-        LOG_DEBUG << "SharedTaskObj<void>: " << this << " await_resume()." << std::endl;
+        LOG_DEBUG << "SharedTaskObj<void>: " << static_cast<void*>(this) << " await_resume()." << std::endl;
         if (!state_) {
-            LOG_CRITICAL << "SharedTaskObj<void>: " << this << " Awaiting a SharedTask with null state!" << std::endl;
+            LOG_CRITICAL << "SharedTaskObj<void>: " << static_cast<void*>(this) << " Awaiting a SharedTask with null state!" << std::endl;
             throw std::runtime_error("Awaiting a SharedTask<void> with null state");
-            // return;
         }
         LOG_DEBUG << "  Forwarding to SharedStateID: " << state_->shared_state_id_ << " get_value_or_rethrow()." << std::endl;
         state_->get_value_or_rethrow();
@@ -704,13 +757,13 @@ public:
 namespace detail {
     template<typename T>
     SharedTask<T> SharedTaskPromise<T>::get_return_object() {
-        LOG_DEBUG << "SharedTaskPromiseID: " << promise_id_ << ", PromiseAddr: " << this
-                  << " get_return_object() -> SharedTask for SharedStateID: " << shared_state_ptr_->shared_state_id_ << std::endl;
+        LOG_DEBUG << "SharedTaskPromiseID: " << promise_id_ << ", PromiseAddr: " << static_cast<void*>(this)
+                  << " get_return_object() -> SharedTask<T> for SharedStateID: " << shared_state_ptr_->shared_state_id_ << std::endl;
         return SharedTask<T>(shared_state_ptr_);
     }
 
     inline SharedTask<void> SharedTaskPromise<void>::get_return_object() {
-        LOG_DEBUG << "SharedTaskPromiseID<void>: " << promise_id_ << ", PromiseAddr: " << this
+        LOG_DEBUG << "SharedTaskPromiseID<void>: " << promise_id_ << ", PromiseAddr: " << static_cast<void*>(this)
                   << " get_return_object() -> SharedTask<void> for SharedStateID: " << shared_state_ptr_->shared_state_id_ << std::endl;
         return SharedTask<void>(shared_state_ptr_);
     }
@@ -719,16 +772,24 @@ namespace detail {
 
 } // namespace wutong
 
-// Coroutine traits for SharedTask
+// Coroutine traits for wutong::Task and wutong::SharedTask
 namespace std {
     template <typename T, typename... Args>
+    struct coroutine_traits<wutong::Task<T>, Args...> {
+        using promise_type = typename wutong::Task<T>::promise_type;
+    };
+
+    template <typename... Args>
+    struct coroutine_traits<wutong::Task<void>, Args...> {
+        using promise_type = wutong::Task<void>::promise_type;
+    };
+
+    template <typename T, typename... Args>
     struct coroutine_traits<wutong::SharedTask<T>, Args...> {
-        using promise_type = wutong::detail::SharedTaskPromise<T>;
+        using promise_type = typename wutong::SharedTask<T>::promise_type;
+    };
+    template <typename... Args>
+    struct coroutine_traits<wutong::SharedTask<void>, Args...> {
+        using promise_type = typename wutong::SharedTask<void>::promise_type;
     };
 }
-
-// Undefine logging macros if they are not meant to be used outside this file
-// #undef LOG_PREFIX_WIDTH
-// #undef LOG_DEBUG
-// #undef LOG_WARN
-// #undef LOG_CRITICAL
