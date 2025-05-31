@@ -19,8 +19,6 @@
 
 #define LOG_DEBUG if(TASK_DEBUG) std::cout << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | "
 
-
-// LOG_WARN and LOG_CRITICAL are not affected by TASK_DEBUG and always print to std::cerr.
 #define LOG_WARN if(TASK_DEBUG) std::cerr << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | WARN: "
 #define LOG_CRITICAL std::cerr << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | CRITICAL: "
 
@@ -245,7 +243,6 @@ struct Task<void> {
   public:
     using promise_type = detail::PromiseForVoidSpecial;
     std::coroutine_handle<promise_type> handle;
-
     explicit Task(std::coroutine_handle<promise_type> h) : handle(h) {
         LOG_DEBUG << "TaskObj<void>: " << static_cast<void*>(this) << " constructed. Manages Handle: " << (handle ? handle.address() : nullptr)
                   << ", PromiseID: " << (handle ? handle.promise().promise_id_ : -1ull)

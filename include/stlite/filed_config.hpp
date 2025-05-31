@@ -28,6 +28,7 @@ namespace norb {
       filesystem::fassert(file_path);
       fconfig = std::fstream(file_path,
                              std::ios::binary | std::ios::in | std::ios::out);
+      std::filesystem::resize_file(file_path,4096);
       write_only = filesystem::is_empty(fconfig);
     }
     ~FiledConfig() { fconfig.close(); }
@@ -62,9 +63,9 @@ namespace norb {
 
     static void set_file_path(const std::string &path) { file_path = path; }
 
-    template <typename val_t_, typename... Args>
-    static RAII_Tracker<val_t_> track(Args &&...args) {
-      return RAII_Tracker<val_t_>(val_t_(std::forward<Args>(args)...));
+    template <typename val_t, typename... Args>
+    static RAII_Tracker<val_t> track(Args &&...args) {
+      return RAII_Tracker<val_t>(val_t(std::forward<Args>(args)...));
     }
   };
 

@@ -18,7 +18,7 @@ namespace norb {
     using MutableHandle = PersistentMemory::MutableHandle;
     template <typename val_t_>
     using TrackedConfig = FiledConfig::tracker_t_<val_t_>;
-    using stack_frame_t_ = std::pair<MutableHandle, size_t>;
+    using stack_frame_t = std::pair<MutableHandle, size_t>;
     enum node_type { index, leaf };
 
   public:
@@ -156,10 +156,10 @@ namespace norb {
       return left;
     }
 
-    std::pair<MutableHandle, vector<stack_frame_t_>>
+    std::pair<MutableHandle, vector<stack_frame_t>>
     stack_descend_to_leaf(const index_storage_t_ &index) {
       MutableHandle handle = root_handle.val;
-      vector<stack_frame_t_> history;
+      vector<stack_frame_t> history;
       for (int i = 0; i < tree_height.val - 1; i++) {
         const auto &index_node_ref = *handle.const_ref<IndexNode>();
         const auto next_node_idx = lower_bound(index_node_ref, index);
@@ -202,7 +202,7 @@ namespace norb {
 
     // Auxiliary functions dealing with overflow and underflow
 
-    bool handle_leaf_overflow(const stack_frame_t_ &frame) {
+    bool handle_leaf_overflow(const stack_frame_t &frame) {
       // three slots are needed to perform this function
       auto parent_node_href = frame.first.ref<IndexNode>();
       const size_t insert_at_pos = frame.second;
@@ -232,7 +232,7 @@ namespace norb {
       return parent_node_href->size >= IndexNode::split_threshold;
     }
 
-    bool handle_index_overflow(const stack_frame_t_ &frame) {
+    bool handle_index_overflow(const stack_frame_t &frame) {
       auto parent_node_href = frame.first.ref<IndexNode>();
       const size_t insert_at_pos = frame.second;
       auto old_node_href =
@@ -341,7 +341,7 @@ namespace norb {
     /**
      * @return Whether going on is needed.
      */
-    bool handle_leaf_underflow(const stack_frame_t_ &frame) {
+    bool handle_leaf_underflow(const stack_frame_t &frame) {
       // A. borrow if possible
       auto parent_node_href = frame.first.ref<IndexNode>();
       const size_t old_child_at_pos = frame.second;
@@ -385,7 +385,7 @@ namespace norb {
       return parent_node_href->size <= IndexNode::merge_threshold;
     }
 
-    bool handle_index_underflow(const stack_frame_t_ &frame) {
+    bool handle_index_underflow(const stack_frame_t &frame) {
       // A. borrow if possible
       auto parent_node_href = frame.first.ref<IndexNode>();
       const size_t old_child_at_pos = frame.second;

@@ -32,4 +32,9 @@ namespace norb {
     return Pair<std::decay_t<first_t_>, std::decay_t<second_t_>>(
         std::forward<first_t_>(first), std::forward<second_t_>(second));
   }
+  template <typename first_t_, typename second_t_>
+  constexpr Pair<first_t_,second_t_>
+  make_pair(const first_t_& first, const second_t_ &second) {
+    return Pair(first,second);
+  }
 } // namespace norb

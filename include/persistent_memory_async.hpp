@@ -17,7 +17,7 @@
 
 #include <iostream>
 #include <map>
-
+#include <smart_task.h>
 
 namespace norb {
   /**
@@ -142,7 +142,7 @@ namespace norb {
       return slot_id;
     }
 
-    //Should check this before creating a coroutine
+    //IMPORTANT: Should check this before creating a coroutine, or buffer may overflow
     bool permit_IO() {
       if(evict_order.size()<=SLOT_COUNT/2) {
         return false;
@@ -184,7 +184,8 @@ namespace norb {
         task = it->second;
       } else {
         is_lead = true;
-        task = evict_and_load(page_id, is_new);
+        slot_id_t slot_id = get_lru_k();
+        task = evict_and_load(page_id,slot_id,is_new);
         it = ongoing.insert({page_id, task}).first;
       }
       slot_id_t slot_id = co_await task;
@@ -199,9 +200,17 @@ namespace norb {
       //co_return slot_id;
     }
 
-    wutong::SharedTask<slot_id_t> evict_and_load(page_id_t page_id,
+    std::optional<slot_id_t> try_find_page(const page_id_t& page_id) const {
+      slot_id_t found_slot_id = find_page_id_in_buffer(page_id);
+      if (found_slot_id != static_cast<slot_id_t>(-1)) {
+        return found_slot_id;
+      } else {
+        return std::nullopt;
+      }
+    }
+
+    wutong::SharedTask<slot_id_t> evict_and_load(page_id_t page_id,slot_id_t slot_id,
                                                  bool is_new = false) {
-      slot_id_t slot_id = get_lru_k();
       auto &slot = slots[slot_id];
 #ifdef PMA_DEBUG
       std::cout<<"Evict slot:"<<slot_id<<" which stores:"<<slot.buffer_page_id<<" for page:"<<page_id<<std::endl;
@@ -293,6 +302,16 @@ namespace norb {
       std::filesystem::resize_file(PMEM_FILE_NAME, max_page_size_ * PAGE_SIZE);
     }
 
+    wutong::SmartTask<void> prefetch_batch(const sjtu::vector<page_id_t>& batch_page_ids) {
+      sjtu::vector<wutong::Task<ConstHandledReference<char>>> tasks;
+      for (auto& page_id:batch_page_ids) {
+        tasks.push_back(MutableHandle(page_id).const_ref<char>());
+      }
+      for(auto& task:tasks) {
+        co_await task;
+      }
+    }
+
     /**
      * @class GarbageCollector
      * @brief A helper class to collect deallocated pages.
@@ -328,8 +347,8 @@ namespace norb {
       slot_id_t slot_id_;
       page_id_t page_id_;
 
-      friend struct Handle<T>;
-      friend struct MutableHandle;
+      friend struct PersistentMemoryAsync::Handle<T>;
+      friend struct PersistentMemoryAsync::MutableHandle;
 
       // Private constructor, to be called by Handle's async methods
       HandledReference(PersistentMemoryAsync &pmem, slot_id_t sid,
@@ -338,7 +357,6 @@ namespace norb {
         assert(pmem_ptr_ != nullptr && "PMA pointer is null in HandledReference constructor");
         assert(slot_id_ != static_cast<slot_id_t>(-1) && "Invalid slot_id in HandledReference constructor");
         assert(page_id_ != static_cast<page_id_t>(-1) && "Invalid page_id in HandledReference constructor");
-        // CRITICAL ASSERTION: The slot's metadata must match the page_id this reference is for.
         assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_ && "PMA: Slot metadata page_id mismatch with handle's page_id at mutable ref creation");
 
         pmem_ptr_->lock_slot(slot_id_);
@@ -347,28 +365,54 @@ namespace norb {
       }
 
     public:
-      // Rule of 5/0: Make non-copyable, but movable for returning from tasks.
-      HandledReference(const HandledReference &) = delete;
-      HandledReference &operator=(const HandledReference &) = delete;
+      // Copy Constructor
+      HandledReference(const HandledReference &other)
+          : pmem_ptr_(other.pmem_ptr_), slot_id_(other.slot_id_), page_id_(other.page_id_) {
+        if (pmem_ptr_) {
+          assert(slot_id_ != static_cast<slot_id_t>(-1) && "Invalid slot_id in HandledReference copy constructor");
+          assert(page_id_ != static_cast<page_id_t>(-1) && "Invalid page_id in HandledReference copy constructor");
+          assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_ && "PMA: Slot metadata page_id mismatch in HandledReference copy ctor");
+          pmem_ptr_->lock_slot(slot_id_);
+        }
+      }
+
+      HandledReference &operator=(const HandledReference &other) {
+        if (this != &other) {
+          Drop();
+
+          pmem_ptr_ = other.pmem_ptr_;
+          slot_id_ = other.slot_id_;
+          page_id_ = other.page_id_;
+
+          if (pmem_ptr_) { // If other was valid and held a resource
+            assert(slot_id_ != static_cast<slot_id_t>(-1) && "Invalid slot_id in HandledReference copy assignment");
+            assert(page_id_ != static_cast<page_id_t>(-1) && "Invalid page_id in HandledReference copy assignment");
+            assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_ && "PMA: Slot metadata page_id mismatch in HandledReference copy assign");
+            pmem_ptr_->lock_slot(slot_id_);
+          }
+        }
+        return *this;
+      }
 
       HandledReference(HandledReference &&other) noexcept
           : pmem_ptr_(other.pmem_ptr_), slot_id_(other.slot_id_),
             page_id_(other.page_id_) {
         other.pmem_ptr_ = nullptr;
-        other.slot_id_ = -1;
-        other.page_id_ = -1;
+        other.slot_id_ = static_cast<slot_id_t>(-1);
+        other.page_id_ = static_cast<page_id_t>(-1);
       }
 
       HandledReference &operator=(HandledReference &&other) noexcept {
         if (this != &other) {
           Drop();
+
           pmem_ptr_ = other.pmem_ptr_;
           slot_id_ = other.slot_id_;
           page_id_ = other.page_id_;
-          // Invalidate moved-from object
+
           other.pmem_ptr_ = nullptr;
-          other.slot_id_ = -1;
-          other.page_id_ = -1;
+          other.slot_id_ = static_cast<slot_id_t>(-1);
+          other.page_id_ = static_cast<page_id_t>(-1);
         }
         return *this;
       }
@@ -376,31 +420,31 @@ namespace norb {
       ~HandledReference() { Drop(); }
 
       T *operator->() const {
-        assert(pmem_ptr_ && slot_id_ != static_cast<slot_id_t>(-1));
-        assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_);
+        assert(pmem_ptr_ && slot_id_ != static_cast<slot_id_t>(-1) && "Accessing via invalid HandledReference (->)");
+        assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_ && "PMA: Slot metadata page_id mismatch on access (->)");
         return reinterpret_cast<T *>(pmem_ptr_->buffer[slot_id_]);
       }
 
       T &operator*() const {
-        assert(pmem_ptr_ && slot_id_ != static_cast<slot_id_t>(-1));
-        assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_);
+        assert(pmem_ptr_ && slot_id_ != static_cast<slot_id_t>(-1) && "Accessing via invalid HandledReference (*)");
+        assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_ && "PMA: Slot metadata page_id mismatch on access (*)");
         return *reinterpret_cast<T *>(pmem_ptr_->buffer[slot_id_]);
       }
 
       T *as_raw_ptr() const {
-        assert(pmem_ptr_ && slot_id_ != static_cast<slot_id_t>(-1));
-        assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_);
+        assert(pmem_ptr_ && slot_id_ != static_cast<slot_id_t>(-1) && "Accessing via invalid HandledReference (as_raw_ptr)");
+        assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_ && "PMA: Slot metadata page_id mismatch on access (as_raw_ptr)");
         return reinterpret_cast<T *>(pmem_ptr_->buffer[slot_id_]);
       }
 
       void Drop() {
-        if (!pmem_ptr_ || slot_id_ == -1) {
-          return;
+        if (pmem_ptr_ && slot_id_ != static_cast<slot_id_t>(-1)) {
+          assert(page_id_ != static_cast<page_id_t>(-1) && "Invalid page_id in Drop, but slot_id was valid");
+          pmem_ptr_->unlock_slot(slot_id_);
         }
-        pmem_ptr_->unlock_slot(slot_id_);
         pmem_ptr_ = nullptr;
-        slot_id_ = -1;
-        page_id_ = -1;
+        slot_id_ = static_cast<slot_id_t>(-1);
+        page_id_ = static_cast<page_id_t>(-1);
       }
     };
 
@@ -410,9 +454,9 @@ namespace norb {
      */
     template <typename T> struct ConstHandledReference {
     private:
-      PersistentMemoryAsync *pmem_ptr_; // Pointer to the manager instance
+      PersistentMemoryAsync *pmem_ptr_;
       slot_id_t slot_id_;
-      page_id_t page_id_; // Store for assertions/debugging
+      page_id_t page_id_;
 
       friend struct PersistentMemoryAsync::Handle<T>;
       friend struct PersistentMemoryAsync::MutableHandle;
@@ -430,29 +474,50 @@ namespace norb {
       }
 
     public:
-      // Rule of 5/0: Make non-copyable, but movable for returning from tasks.
-      ConstHandledReference(const ConstHandledReference &) = delete;
-      ConstHandledReference &operator=(const ConstHandledReference &) = delete;
+      // Copy Constructor
+      ConstHandledReference(const ConstHandledReference &other)
+          : pmem_ptr_(other.pmem_ptr_), slot_id_(other.slot_id_), page_id_(other.page_id_) {
+        if (pmem_ptr_) {
+          assert(slot_id_ != static_cast<slot_id_t>(-1) && "Invalid slot_id in ConstHandledReference copy constructor");
+          assert(page_id_ != static_cast<page_id_t>(-1) && "Invalid page_id in ConstHandledReference copy constructor");
+          assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_ && "PMA: Slot metadata page_id mismatch in ConstHandledReference copy ctor");
+          pmem_ptr_->lock_slot(slot_id_);
+        }
+      }
+
+      ConstHandledReference &operator=(const ConstHandledReference &other) {
+        if (this != &other) {
+          Drop();
+          pmem_ptr_ = other.pmem_ptr_;
+          slot_id_ = other.slot_id_;
+          page_id_ = other.page_id_;
+          if (pmem_ptr_) {
+            assert(slot_id_ != static_cast<slot_id_t>(-1) && "Invalid slot_id in ConstHandledReference copy assignment");
+            assert(page_id_ != static_cast<page_id_t>(-1) && "Invalid page_id in ConstHandledReference copy assignment");
+            assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_ && "PMA: Slot metadata page_id mismatch in ConstHandledReference copy assign");
+            pmem_ptr_->lock_slot(slot_id_);
+          }
+        }
+        return *this;
+      }
 
       ConstHandledReference(ConstHandledReference &&other) noexcept
           : pmem_ptr_(other.pmem_ptr_), slot_id_(other.slot_id_),
             page_id_(other.page_id_) {
         other.pmem_ptr_ = nullptr;
-        other.slot_id_ = -1;
-        other.page_id_ = -1;
+        other.slot_id_ = static_cast<slot_id_t>(-1);
+        other.page_id_ = static_cast<page_id_t>(-1);
       }
 
       ConstHandledReference &operator=(ConstHandledReference &&other) noexcept {
         if (this != &other) {
           Drop();
-          // Pilfer other's resources
           pmem_ptr_ = other.pmem_ptr_;
           slot_id_ = other.slot_id_;
           page_id_ = other.page_id_;
-          // Invalidate moved-from object
           other.pmem_ptr_ = nullptr;
-          other.slot_id_ = -1;
-          other.page_id_ = -1;
+          other.slot_id_ = static_cast<slot_id_t>(-1);
+          other.page_id_ = static_cast<page_id_t>(-1);
         }
         return *this;
       }
@@ -460,34 +525,33 @@ namespace norb {
       ~ConstHandledReference() { Drop(); }
 
       const T *operator->() const {
-        assert(pmem_ptr_ && slot_id_ != static_cast<slot_id_t>(-1));
-        assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_);
-        return reinterpret_cast<T *>(pmem_ptr_->buffer[slot_id_]);
+        assert(pmem_ptr_ && slot_id_ != static_cast<slot_id_t>(-1) && "Accessing via invalid ConstHandledReference (->)");
+        assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_ && "PMA: Slot metadata page_id mismatch on access (->)");
+        return reinterpret_cast<const T *>(pmem_ptr_->buffer[slot_id_]);
       }
 
       const T &operator*() const {
-        assert(pmem_ptr_ && slot_id_ != static_cast<slot_id_t>(-1));
-        assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_);
-        return *reinterpret_cast<T *>(pmem_ptr_->buffer[slot_id_]);
+        assert(pmem_ptr_ && slot_id_ != static_cast<slot_id_t>(-1) && "Accessing via invalid ConstHandledReference (*)");
+        assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_ && "PMA: Slot metadata page_id mismatch on access (*)");
+        return *reinterpret_cast<const T *>(pmem_ptr_->buffer[slot_id_]);
       }
 
       const T *as_raw_ptr() const {
-        assert(pmem_ptr_ && slot_id_ != static_cast<slot_id_t>(-1));
-        assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_);
-        return reinterpret_cast<T *>(pmem_ptr_->buffer[slot_id_]);
+        assert(pmem_ptr_ && slot_id_ != static_cast<slot_id_t>(-1) && "Accessing via invalid ConstHandledReference (as_raw_ptr)");
+        assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_ && "PMA: Slot metadata page_id mismatch on access (as_raw_ptr)");
+        return reinterpret_cast<const T *>(pmem_ptr_->buffer[slot_id_]);
       }
 
       void Drop() {
-        if (!pmem_ptr_ || slot_id_ == -1) {
-          return;
+        if (pmem_ptr_ && slot_id_ != static_cast<slot_id_t>(-1)) {
+          assert(page_id_ != static_cast<page_id_t>(-1) && "Invalid page_id in Drop, but slot_id was valid");
+          pmem_ptr_->unlock_slot(slot_id_);
         }
-        pmem_ptr_->unlock_slot(slot_id_);
         pmem_ptr_ = nullptr;
-        slot_id_ = -1;
-        page_id_ = -1;
+        slot_id_ = static_cast<slot_id_t>(-1);
+        page_id_ = static_cast<page_id_t>(-1);
       }
     };
-
     explicit PersistentMemoryAsync(const std::string &path)
         : fmemory(path, SLOT_COUNT) {
       // create the file if it does not exist
@@ -552,7 +616,7 @@ namespace norb {
     }
 
 
-    //should not be called inside a coroutine. BEST PRACTICE: call only in the main event loop
+    //IMPORTANT:should not be called inside a coroutine. BEST PRACTICE: call only in the main event loop
     void poll() {
       fmemory.handle_completions();
     }
@@ -596,6 +660,17 @@ namespace norb {
         co_return HandledReference<T>(pmem, slot_id, page_id);
       }
 
+      std::optional<HandledReference<T>> try_ref() const {
+        assert(!is_nullptr());
+        auto &pmem = get_instance();
+        auto result = pmem.try_find_page(page_id);
+        if(!result) {
+          return std::nullopt;
+        }
+        auto slot_id = result.value();
+        return HandledReference<T>(pmem, slot_id, page_id);
+      }
+
       /**
        * @brief Retrieve a read-only reference to the chunk of persistent
        * memory.
@@ -606,6 +681,17 @@ namespace norb {
         auto &pmem = get_instance();
         slot_id_t slot_id = co_await pmem.acquire_page_in_slot(page_id, false);
         co_return ConstHandledReference<T>(pmem, slot_id, page_id);
+      }
+
+      std::optional<ConstHandledReference<T>> try_const_ref() const {
+        assert(!is_nullptr());
+        auto &pmem = get_instance();
+        auto result = pmem.try_find_page(page_id);
+        if(!result) {
+          return std::nullopt;
+        }
+        auto slot_id = result.value();
+        return ConstHandledReference<T>(pmem, slot_id, page_id);
       }
 
       [[nodiscard]] bool is_nullptr() const {
@@ -644,6 +730,18 @@ namespace norb {
         co_return HandledReference<T>(pmem, slot_id, page_id);
       }
 
+      template <typename T>
+      std::optional<HandledReference<T>> try_ref() const {
+        assert(!is_nullptr());
+        auto &pmem = get_instance();
+        auto result = pmem.try_find_page(page_id);
+        if(!result) {
+          return std::nullopt;
+        }
+        auto slot_id = result.value();
+        return HandledReference<T>(pmem, slot_id, page_id);
+      }
+
       /**
        * @brief Retrieve a read-only reference to the chunk of persistent
        * memory.
@@ -656,6 +754,18 @@ namespace norb {
         // For const_ref, is_initializing is typically false.
         slot_id_t slot_id = co_await pmem.acquire_page_in_slot(page_id, false);
         co_return ConstHandledReference<T>(pmem, slot_id, page_id);
+      }
+
+      template <typename T>
+      std::optional<ConstHandledReference<T>> try_const_ref() const {
+        assert(!is_nullptr());
+        auto &pmem = get_instance();
+        auto result = pmem.try_find_page(page_id);
+        if(!result) {
+          return std::nullopt;
+        }
+        auto slot_id = result.value();
+        return ConstHandledReference<T>(pmem, slot_id, page_id);
       }
 
       [[nodiscard]] bool is_nullptr() const {

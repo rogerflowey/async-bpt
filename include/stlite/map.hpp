@@ -536,6 +536,8 @@ namespace sjtu {
       }
     };
 
+    using const_iterator = const_iterator;
+
 
     map(){
       _size = 0;
@@ -752,6 +754,38 @@ namespace sjtu {
     const_iterator find(const Key &key) const {
       auto result = find_unique(key);
       return const_iterator((result.curr),this);
+    }
+
+    iterator lower_bound(const Key& key) {
+      auto result = find_unique(key);
+
+      if (result.curr) {
+        return iterator(result.curr, this);
+      }
+      if (result.father == nullptr) {
+        return end();
+      }
+      if (result.is_left) {
+        return iterator(result.father, this);
+      } else {
+        return iterator(result.father->next(), this);
+      }
+    }
+
+    const_iterator lower_bound(const Key& key) const {
+      auto result = find_unique(key);
+
+      if (result.curr) {
+        return iterator(result.curr, this);
+      }
+      if (result.father == nullptr) {
+        return end();
+      }
+      if (result.is_left) {
+        return iterator(result.father, this);
+      } else {
+        return iterator(result.father->next(), this);
+      }
     }
   };
 }
