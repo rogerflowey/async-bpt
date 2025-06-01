@@ -1,7 +1,3 @@
-#define PMA_DEBUG
-#define BPT_DEBUG true
-
-
 #include "async_bpt.h"
 #include "tasks.h"
 #include "smart_task.h"
