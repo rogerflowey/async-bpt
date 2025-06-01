@@ -60,26 +60,25 @@ ExternalProject_Add(${LIBURING_PROJECT_NAME}
         DOWNLOAD_COMMAND    ""
         UPDATE_COMMAND      ""
 
-        # --- Add this line ---
-        BUILD_IN_SOURCE     1
-        # ---------------------
+        # Skip configure command or make it a no-op
+        CONFIGURE_COMMAND   ""
+        # Or CONFIGURE_COMMAND echo "Skipping configure; using pre-generated Makefile"
 
-        # The CONFIGURE_COMMAND itself can remain the same.
-        # ExternalProject_Add will set the working directory to LIBURING_SOURCE_DIR
-        # before running this command if BUILD_IN_SOURCE is 1.
-        CONFIGURE_COMMAND   sh ${LIBURING_SOURCE_DIR}/configure
-        --prefix=${LIBURING_CONFIGURE_PREFIX_ARG}
-        --libdir=${LIBURING_CONFIGURE_LIBDIR_ARG}
-        --includedir=${LIBURING_CONFIGURE_INCLUDEDIR_ARG}
-        # The BUILD_COMMAND and INSTALL_COMMAND will also run in LIBURING_SOURCE_DIR
-        BUILD_COMMAND       $(MAKE)
-        INSTALL_COMMAND     $(MAKE) install
+        # Build command would now directly use the (hopefully) existing Makefile
+        # It needs to be told where to install things, as 'configure' usually sets this in the Makefile
+        BUILD_COMMAND       $(MAKE) # This might need to be $(MAKE) -C ${LIBURING_SOURCE_DIR}/src if the main lib is there
 
-        # BUILD_BYPRODUCTS should still point to the final installed locations
+        # Install command also needs overrides
+        INSTALL_COMMAND     $(MAKE) install \
+                            prefix=${LIBURING_CONFIGURE_PREFIX_ARG} \
+                            libdir=${LIBURING_CONFIGURE_LIBDIR_ARG} \
+                            includedir=${LIBURING_CONFIGURE_INCLUDEDIR_ARG}
+        # You might need -C ${LIBURING_SOURCE_DIR}/src here too
+
         BUILD_BYPRODUCTS    ${LIBURING_STATIC_LIB_PATH} ${LIBURING_EXPECTED_HEADER_FILE}
-        LOG_CONFIGURE       1
         LOG_BUILD           1
         LOG_INSTALL         1
+        BUILD_IN_SOURCE     1 # Likely needed if Makefiles are in the source dir
 )
 
 # --- Create an IMPORTED library target for liburing ---
