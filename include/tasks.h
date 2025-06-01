@@ -1,16 +1,17 @@
 #pragma once
 
+#include <atomic> // For unique IDs
 #include <coroutine>
-#include <utility>      // For std::exchange
-#include <exception>    // For std::terminate, std::current_exception, std::exception_ptr
-#include <stdexcept>    // For std::runtime_error
-#include <optional>     // For SharedState value
-#include <vector>       // For SharedState continuations
-#include <memory>       // For std::shared_ptr
-#include <iostream>     // For std::cout, std::cerr, std::endl, std::left
-#include <atomic>       // For unique IDs
-#include <iomanip>      // For std::setw for aligned logging
-#include <string>       // For std::to_string
+#include <exception> // For std::terminate, std::current_exception, std::exception_ptr
+#include <functional>
+#include <iomanip>   // For std::setw for aligned logging
+#include <iostream>  // For std::cout, std::cerr, std::endl, std::left
+#include <memory>    // For std::shared_ptr
+#include <optional>  // For SharedState value
+#include <stdexcept> // For std::runtime_error
+#include <string>    // For std::to_string
+#include <utility>   // For std::exchange
+#include <vector>    // For SharedState continuations
 //#define TASK_DEBUG
 
 #define LOG_PREFIX_WIDTH 35
@@ -765,6 +766,203 @@ namespace detail {
         return SharedTask<void>(shared_state_ptr_);
     }
 } // namespace detail
+
+    template <typename T>
+class CriteriaVariable {
+public:
+    using CriteriaFunc = std::function<bool(const T &)>;
+
+private:
+    T value_;
+    CriteriaFunc criteria_func_;
+    std::vector<std::coroutine_handle<>> waiting_coroutines_;
+    bool is_evaluating_criteria_ = false; // Prevents re-entrant evaluation during coroutine resumption
+
+public:
+    /**
+     * @brief Constructs a CriteriaVariable.
+     * @param initial_value The initial value to hold.
+     * @param criteria A function that takes a const reference to the value and returns true if the criteria are met.
+     */
+    template<typename U = T> // SFINAE-friendly for perfect forwarding of initial_value
+    CriteriaVariable(U&& initial_value, CriteriaFunc criteria)
+        : value_(std::forward<U>(initial_value)), criteria_func_(std::move(criteria)) {
+        LOG_DEBUG<<"Constructed. Initial criteria met: " << std::boolalpha << (criteria_func_ ? criteria_func_(value_) : false);
+    }
+
+    // Deleted copy/move constructors and assignment operators.
+    // If move semantics are needed, careful handling of waiting_coroutines_ is required.
+    // Typically, these objects are stack-allocated within a coroutine or managed via shared_ptr.
+    CriteriaVariable(const CriteriaVariable&) = delete;
+    CriteriaVariable& operator=(const CriteriaVariable&) = delete;
+    CriteriaVariable(CriteriaVariable&&) = delete; 
+    CriteriaVariable& operator=(CriteriaVariable&&) = delete;
+
+    /**
+     * @brief Proxy object for modifying the managed value.
+     *
+     * Returned by `operator->()` and `operator*()` of `CriteriaVariable`.
+     * When this proxy is destructed (at the end of the full expression where
+     * it was created), it triggers the evaluation of the criteria on the
+     * `CriteriaVariable` object.
+     */
+    class ValueMutatorProxy {
+    public:
+        ValueMutatorProxy(CriteriaVariable* owner) : owner_(owner) {
+        }
+
+        ~ValueMutatorProxy() {
+            if (owner_) {
+                owner_->evaluate_criteria_and_notify_waiters();
+            }
+        }
+
+        // Proxies are typically short-lived and tied to an expression; disallow copy/move.
+        ValueMutatorProxy(const ValueMutatorProxy&) = delete;
+        ValueMutatorProxy& operator=(const ValueMutatorProxy&) = delete;
+        ValueMutatorProxy(ValueMutatorProxy&&) = delete;
+        ValueMutatorProxy& operator=(ValueMutatorProxy&&) = delete;
+
+        T* operator->() {
+            return &(owner_->value_);
+        }
+
+        T& operator*() {
+            return owner_->value_;
+        }
+
+    private:
+        CriteriaVariable* owner_;
+    };
+
+    /**
+     * @brief Provides access to modify the internal value via pointer-like semantics.
+     *        e.g., `my_criteria_var->member = newValue;`
+     *        Criteria are checked when the returned proxy is destructed.
+     * @return A ValueMutatorProxy for modifying the value.
+     */
+    ValueMutatorProxy operator->() {
+        return ValueMutatorProxy(this);
+    }
+
+    /**
+     * @brief Provides access to modify the internal value via reference-like semantics.
+     *        e.g., `(*my_criteria_var) = newValue;`
+     *        Criteria are checked when the returned proxy is destructed.
+     * @return A ValueMutatorProxy for modifying the value.
+     */
+    ValueMutatorProxy operator*() { 
+        return ValueMutatorProxy(this);
+    }
+    
+    /**
+     * @brief Manually triggers the evaluation of criteria and notifies waiters if met.
+     *        This is primarily called by the `ValueMutatorProxy`'s destructor but can
+     *        be called manually if the value is modified by other means (not recommended
+     *        without understanding implications).
+     */
+    void evaluate_criteria_and_notify_waiters() {
+        if (is_evaluating_criteria_) {
+            LOG_DEBUG<<"Re-entrant call to evaluate_criteria_and_notify_waiters detected. Skipping.";
+            return;
+        }
+        
+        is_evaluating_criteria_ = true; 
+
+        LOG_DEBUG<<"Evaluating criteria. Current value (details depend on T). Waiters: " << waiting_coroutines_.size();
+        
+        if (!criteria_func_) {
+             LOG_DEBUG<<"Warning: Criteria function is null.";
+             is_evaluating_criteria_ = false;
+             return;
+        }
+        bool criteria_met_now = criteria_func_(value_);
+
+        if (criteria_met_now && !waiting_coroutines_.empty()) {
+            LOG_DEBUG<<"Criteria MET. Moving " << waiting_coroutines_.size() << " waiters for resumption.";
+            std::vector<std::coroutine_handle<>> to_resume_local = std::move(waiting_coroutines_);
+            // waiting_coroutines_ is now empty.
+
+            LOG_DEBUG<<"Resuming " << to_resume_local.size() << " waiters.";
+            for (std::coroutine_handle<> h : to_resume_local) { // Iterate by value (copy of handle)
+                if (h) {
+                    LOG_DEBUG<<"Resuming coroutine at address " << h.address();
+                    h.resume(); 
+                }
+            }
+        } else if (criteria_met_now) {
+            LOG_DEBUG<<"Criteria MET. No waiters to resume.";
+        }
+        else {
+            LOG_DEBUG<<"Criteria NOT met.";
+        }
+        is_evaluating_criteria_ = false;
+    }
+
+    // --- Awaitable interface ---
+
+    /**
+     * @brief Checks if the criteria are currently met. Part of the awaitable interface.
+     * @return `true` if criteria are met (co_await will not suspend), `false` otherwise.
+     */
+    bool await_ready() const {
+        if (!criteria_func_) {
+            LOG_DEBUG<<"await_ready: Criteria function is null. Assuming not ready.";
+            return false;
+        }
+        bool ready = criteria_func_(value_);
+        LOG_DEBUG<<"await_ready called. Criteria met: " << std::boolalpha << ready;
+        return ready;
+    }
+
+    /**
+     * @brief Suspends the awaiting coroutine if criteria are not met. Part of the awaitable interface.
+     * @param awaiting_coroutine The handle of the coroutine that is `co_await`ing.
+     * @return `true` to suspend the coroutine, `false` to continue without suspension (if criteria met concurrently).
+     */
+    bool await_suspend(std::coroutine_handle<> awaiting_coroutine) {
+        if (!criteria_func_) {
+             LOG_DEBUG<<"await_suspend: Criteria function is null. Suspending.";
+             waiting_coroutines_.push_back(awaiting_coroutine);
+             return true; // Suspend
+        }
+
+        // Re-check criteria. In a single-threaded model, this is mainly for robustness
+        // if other resumed coroutines could have affected this object's state.
+        if (criteria_func_(value_)) {
+            LOG_DEBUG<<"await_suspend: Criteria met (re-check). Not suspending coroutine " << awaiting_coroutine.address();
+            return false; // Don't suspend
+        }
+
+        LOG_DEBUG<<"await_suspend: Storing coroutine " << awaiting_coroutine.address() << " for later. Suspending.";
+        waiting_coroutines_.push_back(awaiting_coroutine);
+        return true; // Suspend
+    }
+
+    /**
+     * @brief Called when the coroutine resumes after suspension. Part of the awaitable interface.
+     */
+    void await_resume() const {
+        LOG_DEBUG<<"await_resume: Resumed. Criteria was met at the point of the resumption signal.";
+    }
+
+    /**
+     * @brief Gets a copy of the current value.
+     * @return A copy of the held value.
+     */
+    T get_value() const { 
+        return value_;
+    }
+
+    /**
+     * @brief Provides const access to the internal value without triggering criteria evaluation.
+     * Useful for inspection.
+     * @return A const reference to the held value.
+     */
+    const T& peek_value() const {
+        return value_;
+    }
+};
 
 
 } // namespace wutong

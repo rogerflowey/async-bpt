@@ -16,14 +16,18 @@ struct queue {
   }
 
   void push(const T& value) {
-    data[_back] = value;
+    new(data+_back) T(value);
+    _back = next(_back);
+  }
+  void push(T&& value) {
+    new(data+_back) T(std::move(value));
     _back = next(_back);
   }
 
   T pop() {
-    T temp = data[_front];
+    T temp = std::move(data[_front]);
     _front = next(_front);
-    return temp;
+    return std::move(temp);
   }
   [[nodiscard]] bool empty() const {
     return _back==_front;

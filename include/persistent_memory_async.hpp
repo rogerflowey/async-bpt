@@ -19,6 +19,8 @@
 #include <map>
 #include <smart_task.h>
 
+//#define PMA_DEBUG
+
 namespace norb {
   /**
    * @class PersistentMemoryAsync
@@ -419,6 +421,10 @@ namespace norb {
 
       ~HandledReference() { Drop(); }
 
+      MutableHandle get_handle() {
+        return MutableHandle{page_id_};
+      }
+
       T *operator->() const {
         assert(pmem_ptr_ && slot_id_ != static_cast<slot_id_t>(-1) && "Accessing via invalid HandledReference (->)");
         assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_ && "PMA: Slot metadata page_id mismatch on access (->)");
@@ -523,6 +529,10 @@ namespace norb {
       }
 
       ~ConstHandledReference() { Drop(); }
+
+      MutableHandle get_handle() {
+        return MutableHandle{page_id_};
+      }
 
       const T *operator->() const {
         assert(pmem_ptr_ && slot_id_ != static_cast<slot_id_t>(-1) && "Accessing via invalid ConstHandledReference (->)");
