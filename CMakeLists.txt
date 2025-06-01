@@ -69,10 +69,10 @@ ExternalProject_Add(${LIBURING_PROJECT_NAME}
         BUILD_COMMAND       $(MAKE) # This might need to be $(MAKE) -C ${LIBURING_SOURCE_DIR}/src if the main lib is there
 
         # Install command also needs overrides
-        INSTALL_COMMAND     $(MAKE) install \
-                            prefix=${LIBURING_CONFIGURE_PREFIX_ARG} \
-                            libdir=${LIBURING_CONFIGURE_LIBDIR_ARG} \
-                            includedir=${LIBURING_CONFIGURE_INCLUDEDIR_ARG}
+        INSTALL_COMMAND     $(MAKE) install  # No backslash
+        prefix=${LIBURING_CONFIGURE_PREFIX_ARG}  # No backslash
+        libdir=${LIBURING_CONFIGURE_LIBDIR_ARG}  # No backslash
+        includedir=${LIBURING_CONFIGURE_INCLUDEDIR_ARG} # Last line, no backslash needed
         # You might need -C ${LIBURING_SOURCE_DIR}/src here too
 
         BUILD_BYPRODUCTS    ${LIBURING_STATIC_LIB_PATH} ${LIBURING_EXPECTED_HEADER_FILE}
