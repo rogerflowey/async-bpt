@@ -67,7 +67,7 @@ ExternalProject_Add(${LIBURING_PROJECT_NAME}
         # The CONFIGURE_COMMAND itself can remain the same.
         # ExternalProject_Add will set the working directory to LIBURING_SOURCE_DIR
         # before running this command if BUILD_IN_SOURCE is 1.
-        CONFIGURE_COMMAND   ${LIBURING_SOURCE_DIR}/configure
+        CONFIGURE_COMMAND   sh ${LIBURING_SOURCE_DIR}/configure
         --prefix=${LIBURING_CONFIGURE_PREFIX_ARG}
         --libdir=${LIBURING_CONFIGURE_LIBDIR_ARG}
         --includedir=${LIBURING_CONFIGURE_INCLUDEDIR_ARG}
