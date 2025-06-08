@@ -19,9 +19,11 @@
 
 //#define TEMPLATE_CHECK
 
+#ifndef BPT_DEBUG
 #define BPT_DEBUG false
+#endif
 
-#define BPT_LOG_DEBUG if(BPT_DEBUG) std::cout << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | "
+#define BPT_LOG_DEBUG if(BPT_DEBUG) std::cerr << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | "
 #define BPT_LOG_WARN if(BPT_DEBUG) std::cerr << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | WARN: "
 #define BPT_LOG_CRITICAL std::cerr << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | CRITICAL: "
 
@@ -43,7 +45,7 @@ namespace norb {
 #ifndef USE_SMALL_BATCH
     static constexpr size_t FLUSH_THRESHOLD = 10000;
 #else
-    static constexpr size_t FLUSH_THRESHOLD = 10;
+    static constexpr size_t FLUSH_THRESHOLD = 40;
 #endif
 
   private:
@@ -1473,8 +1475,8 @@ namespace norb {
       q.push({root_handle_.val, 0});
       size_t current_level_print = 0;
       if (!q.empty()) {
-          // Use std::cout directly for traverse_async as it's a utility
-          std::cout << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | Level " << current_level_print << ":" << std::endl;
+          // Use std::cerr directly for traverse_async as it's a utility
+          std::cerr << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | Level " << current_level_print << ":" << std::endl;
       }
 
       while (!q.empty()) {
@@ -1482,7 +1484,7 @@ namespace norb {
         q.pop();
         if (node_level > current_level_print) {
           current_level_print = node_level;
-          std::cout << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | \nLevel " << current_level_print << ":" << std::endl;
+          std::cerr << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | \nLevel " << current_level_print << ":" << std::endl;
         }
         bool is_leaf = (node_level == tree_height_.val - 1);
 
@@ -1500,9 +1502,9 @@ namespace norb {
             }
           }
         }
-        std::cout << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | " << ss_node_info.str() << std::endl;
+        std::cerr << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | " << ss_node_info.str() << std::endl;
       }
-      std::cout << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | --- End Traversal ---" << std::endl << std::endl;
+      std::cerr << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | --- End Traversal ---" << std::endl << std::endl;
       co_return;
     }
 

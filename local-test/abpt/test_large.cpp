@@ -1,5 +1,6 @@
 #define USE_SMALL_BATCH
-
+#define PMA_DEBUG
+//#define TASK_DEBUG true
 #include "test_utils.hpp"
 
 // Define USE_SMALL_BATCH if you want to test with smaller node capacities
@@ -11,6 +12,92 @@ BTreeTest btree_global_large;
 RefModelTest ref_model_global_large;
 
 // --- Test Cases ---
+
+void test_Large_Randomized_Correctness() {
+    std::cout << "\n--- Running test_Large_Randomized_Correctness ---" << std::endl;
+    setup_test_environment(btree_global_large, ref_model_global_large, true, false);
+
+    // --- Test Parameters (easy to tweak) ---
+    const int num_initial_items = 2000;   // Start with 2,000 items on disk
+    const int num_workload_ops  = 20000;  // Perform 20,000 random operations
+    const int key_range         = 4000;   // Use keys in the range [0, 4000)
+    const int flush_interval    = 500;    // Flush to disk every 500 operations
+    const int verify_interval   = 2000;   // Fully verify the tree every 2,000 operations
+
+    auto task = [&]() -> wutong::Task<void> {
+        std::cout << "  LOG: Test Parameters: "
+                  << "InitialItems=" << num_initial_items << ", WorkloadOps=" << num_workload_ops
+                  << ", KeyRange=" << key_range << ", FlushInterval=" << flush_interval
+                  << ", VerifyInterval=" << verify_interval << std::endl;
+
+        // --- Phase 1: Initialization ---
+        std::cout << "  LOG: Phase 1: Initializing B+Tree with random data..." << std::endl;
+        std::vector<storage_pair_test_t> initial_data_std;
+        std::mt19937 gen(std::chrono::system_clock::now().time_since_epoch().count());
+        std::uniform_int_distribution<> key_dist(0, key_range - 1);
+        std::uniform_int_distribution<> val_dist(0, 100000);
+
+        for (int i = 0; i < num_initial_items; ++i) {
+            initial_data_std.push_back(norb::make_pair<idx_t_test, val_t_test>(key_dist(gen), val_dist(gen)));
+        }
+        std::sort(initial_data_std.begin(), initial_data_std.end());
+        initial_data_std.erase(std::unique(initial_data_std.begin(), initial_data_std.end()), initial_data_std.end());
+
+        co_await btree_global_large.initialize_from_vector_async(to_sjtu_vector(initial_data_std));
+        for(const auto& p : initial_data_std) {
+            ref_model_global_large.insert(p);
+        }
+        std::cout << "  LOG: Initialization complete. BTree height: " << btree_global_large.tree_height_.val
+                  << ", Items: " << ref_model_global_large.size() << std::endl;
+
+        // --- Phase 2: Randomized Workload ---
+        std::cout << "  LOG: Phase 2: Starting randomized workload..." << std::endl;
+        std::uniform_int_distribution<> op_dist(0, 9); // 40% insert, 40% remove, 20% find
+
+        for (int i = 1; i <= num_workload_ops; ++i) {
+
+            idx_t_test k = key_dist(gen);
+            val_t_test v = val_dist(gen);
+            int op_choice = op_dist(gen);
+
+            if (op_choice < 4) { // INSERT (40% chance)
+                co_await apply_insert_op(btree_global_large, ref_model_global_large, k, v);
+            } else if (op_choice < 8) { // REMOVE (40% chance)
+                co_await apply_remove_op(btree_global_large, ref_model_global_large, k, v);
+            } else { // FIND (20% chance)
+                co_await verify_all_query(btree_global_large, ref_model_global_large, k, "RandomFind");
+            }
+
+            // Periodic Flush
+            if (i > 0 && i % flush_interval == 0) {
+                std::cout << "  LOG: [Op " << i << "] Flushing to disk. BTree height: "
+                          << btree_global_large.tree_height_.val << ", RefModel size: "
+                          << ref_model_global_large.size() << std::endl;
+                co_await btree_global_large.flush();
+            }
+
+            // Periodic Verification
+            if (i > 0 && i % verify_interval == 0) {
+                std::cout << "  LOG: [Op " << i << "] Performing full verification..." << std::endl;
+                co_await verify_range_query(btree_global_large, ref_model_global_large, 0, BTreeTest::val_min, key_range, BTreeTest::val_max, "PeriodicVerify");
+                std::cout << "  LOG: [Op " << i << "] Verification PASSED." << std::endl;
+            }
+        }
+
+        // --- Phase 3: Final Flush and Verification ---
+        std::cout << "  LOG: Phase 3: Workload complete. Performing final flush and verification..." << std::endl;
+        co_await btree_global_large.flush();
+        std::cout << "  LOG: Final flush complete. BTree height: " << btree_global_large.tree_height_.val
+                  << ", RefModel size: " << ref_model_global_large.size() << std::endl;
+
+        co_await verify_range_query(btree_global_large, ref_model_global_large, 0, BTreeTest::val_min, key_range, BTreeTest::val_max, "FinalVerify");
+        std::cout << "  LOG: Final verification PASSED." << std::endl;
+
+    }();
+    run_task_sync(std::move(task), btree_global_large);
+    teardown_test_environment();
+    std::cout << "--- test_Large_Randomized_Correctness PASSED ---" << std::endl;
+}
 
 void test_AsyncRead_FromInitializedDisk_WithFlush_Detailed() {
     std::cout << "\n--- Running test_AsyncRead_FromInitializedDisk_WithFlush_Detailed ---" << std::endl;
@@ -288,6 +375,7 @@ void run_large_workloads_tests() {
     std::cout << "\n========== Running Large Workloads & Performance Tests (Detailed Logging) ==========" << std::endl;
     //test_AsyncRead_FromInitializedDisk_WithFlush_Detailed();
     test_AsyncMix_DiskAndWriteMap_WithPeriodicFlush_Detailed();
+    test_Large_Randomized_Correctness();
     //test_Performance_AsyncWorkload_Detailed();
 }
 

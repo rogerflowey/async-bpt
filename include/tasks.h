@@ -20,8 +20,7 @@
 #define TASK_DEBUG false
 #endif
 
-#define LOG_DEBUG if(TASK_DEBUG) std::cout << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | "
-
+#define LOG_DEBUG if(TASK_DEBUG) std::cerr << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | "
 #define LOG_WARN if(TASK_DEBUG) std::cerr << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | WARN: "
 #define LOG_CRITICAL std::cerr << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | CRITICAL: "
 

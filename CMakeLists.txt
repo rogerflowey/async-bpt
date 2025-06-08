@@ -51,10 +51,27 @@ endif()
 
 # --- Main Executable Target ---
 add_executable(code src.cpp)
+
 target_link_libraries(code PRIVATE app_core)
 target_compile_options(code PRIVATE -O2)
 #target_compile_options(code PRIVATE  -Wall -Wextra)
+
+add_executable(code_test src.cpp)
+
+target_link_libraries(code_test PRIVATE app_core)
+target_compile_options(code_test PRIVATE -O0)
+#target_compile_options(code PRIVATE  -Wall -Wextra)
+
+set_target_properties(code_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/test_env"
+)
+
 message(STATUS "Configured main executable 'code'.")
+
+add_executable(gen gen.cpp)
+set_target_properties(code PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/test_env"
+)
 
 
 # ==============================================================================

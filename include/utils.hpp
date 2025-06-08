@@ -5,6 +5,7 @@
 #include <cstring>
 #include <fstream>
 #include "shared.hpp"
+#include "stlite/vector.hpp"
 
 namespace norb {
 

@@ -1,3 +1,9 @@
+#define USE_SMALL_BATCH
+#define PMA_DEBUG
+#define TASK_DEBUG true
+#define BPT_DEBUG true
+
+
 #include "async_bpt.h"
 #include "tasks.h"
 #include "smart_task.h"
@@ -52,6 +58,10 @@ void print_find_results(const FindResultType& results) {
 
 
 int main() {
+    freopen("test.in","r",stdin);
+    freopen("test.out","w",stdout);
+    freopen("test.log","w",stderr);
+
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);
     std::cout.tie(nullptr);

@@ -85,7 +85,7 @@ namespace norb {
 
       void Reset() {
 #ifdef PMA_DEBUG
-        std::cout<<"Clearing slot:"<<slot_id<<std::endl;
+        std::cerr<<"Clearing slot:"<<slot_id<<std::endl;
 #endif
         history.clear();
         buffer_page_id = -1;
@@ -117,7 +117,7 @@ namespace norb {
     // auxiliary functions
 
     // Returns the slot number for the page_id, -1 if not found
-    slot_id_t find_page_id_in_buffer(const page_id_t &page_id) const {
+    slot_id_t find_page_id_in_buffer(page_id_t page_id) const {
       auto result = page_table.find(page_id);
       if (result == page_table.cend()) {
         return -1;
@@ -134,7 +134,7 @@ namespace norb {
       slot_id_t slot_id = evict_order.cbegin()->second;
       evict_order.erase(evict_order.begin());
 #ifdef PMA_DEBUG
-      std::cout<<"Slot erased from map:"<<slot_id<<std::endl;
+        std::cerr<<"Slot erased from map:"<<slot_id<<std::endl;
 #endif
 
       slots[slot_id].it = {};
@@ -153,25 +153,25 @@ namespace norb {
     }
 
     // Evict a page from the buffer pool
-    wutong::Task<void> evict_page(const slot_id_t &slot_id) {
+    wutong::Task<void> evict_page(slot_id_t slot_id) {
       auto &slot = slots[slot_id];
       if (slot.is_dirty) {
         // write back to disk
         const page_id_t page_id = slot.buffer_page_id;
 #ifdef PMA_DEBUG
-        std::cout<<"Sending write request in evict_page,slot id:"<<slot_id<<" page_id:"<<page_id<<std::endl;
+        std::cerr<<"Sending write request in evict_page,slot id:"<<slot_id<<" page_id:"<<page_id<<std::endl;
 #endif
         bool success = co_await fmemory.async_write(buffer[slot_id], PAGE_SIZE,
                                                     page_id * PAGE_SIZE);
 #ifdef PMA_DEBUG
-        std::cout<<"Finish write request in evict_page,slot id:"<<slot_id<<" page_id:"<<page_id<<std::endl;
+        std::cerr<<"Finish write request in evict_page,slot id:"<<slot_id<<" page_id:"<<page_id<<std::endl;
 #endif
         assert(success);
         slot.is_dirty = false;
       }
     }
 
-    wutong::Task<slot_id_t> acquire_page_in_slot(const page_id_t &page_id,
+    wutong::Task<slot_id_t> acquire_page_in_slot(page_id_t page_id,
                                                  bool is_new = false) {
       slot_id_t found_slot_id = find_page_id_in_buffer(page_id);
       if (found_slot_id != static_cast<slot_id_t>(-1)) {
@@ -202,7 +202,7 @@ namespace norb {
       //co_return slot_id;
     }
 
-    std::optional<slot_id_t> try_find_page(const page_id_t& page_id) const {
+    std::optional<slot_id_t> try_find_page(page_id_t page_id) const {
       slot_id_t found_slot_id = find_page_id_in_buffer(page_id);
       if (found_slot_id != static_cast<slot_id_t>(-1)) {
         return found_slot_id;
@@ -215,7 +215,7 @@ namespace norb {
                                                  bool is_new = false) {
       auto &slot = slots[slot_id];
 #ifdef PMA_DEBUG
-      std::cout<<"Evict slot:"<<slot_id<<" which stores:"<<slot.buffer_page_id<<" for page:"<<page_id<<std::endl;
+        std::cerr<<"Evict slot:"<<slot_id<<" which stores:"<<slot.buffer_page_id<<" for page:"<<page_id<<std::endl;
 #endif
       co_await evict_page(slot_id);
       if (!is_new) {
@@ -223,12 +223,12 @@ namespace norb {
         memset(buffer[slot_id], 'X', PAGE_SIZE);
 #endif
 #ifdef PMA_DEBUG
-        std::cout<<"Sending read request in evict_and_load,slot id:"<<slot_id<<" page_id:"<<page_id<<std::endl;
+        std::cerr<<"Sending read request in evict_and_load,slot id:"<<slot_id<<" page_id:"<<page_id<<std::endl;
 #endif
         bool success = co_await fmemory.async_read(buffer[slot_id], PAGE_SIZE,
                                                    page_id * PAGE_SIZE);
 #ifdef PMA_DEBUG
-        std::cout<<"Finish read request in evict_and_load,slot id:"<<slot_id<<" page_id:"<<page_id<<std::endl;
+        std::cerr<<"Finish read request in evict_and_load,slot id:"<<slot_id<<" page_id:"<<page_id<<std::endl;
 #endif
         assert(success);
       }
@@ -245,7 +245,7 @@ namespace norb {
     void update_history(const slot_id_t slot_id) {
       auto &slot = slots[slot_id];
 #ifdef PMA_DEBUG
-      std::cout<<"Updating slot:"<<slot_id<<std::endl;
+        std::cerr<<"Updating slot:"<<slot_id<<std::endl;
 #endif
       slot.history.insert(time_stamp);
       ++time_stamp;
@@ -254,7 +254,7 @@ namespace norb {
     void lock_slot(const slot_id_t slot_id) {
       auto &slot = slots[slot_id];
 #ifdef PMA_DEBUG
-      std::cout<<"Locking slot:"<<slot_id<<"pin:"<<slot.lock_count<<std::endl;
+        std::cerr<<"Locking slot:"<<slot_id<<"pin:"<<slot.lock_count<<std::endl;
 #endif
 
       if (++slot.lock_count == 1 && !slot.history.empty()) {
@@ -270,13 +270,13 @@ namespace norb {
     void unlock_slot(const slot_id_t slot_id) {
       auto &slot = slots[slot_id];
 #ifdef PMA_DEBUG
-      std::cout<<"Unlocking slot:"<<slot_id<<"pin:"<<slot.lock_count<<std::endl;
+        std::cerr<<"Unlocking slot:"<<slot_id<<"pin:"<<slot.lock_count<<std::endl;
 #endif
       if (--slot.lock_count == 0) {
         assert(slot.it == decltype(slot.it){});
         slot.it = evict_order.insert({slot.get_timestamp(), slot_id}).first;
 #ifdef PMA_DEBUG
-        std::cout<<"Releasing slot:"<<slot_id<<std::endl;
+        std::cerr<<"Releasing slot:"<<slot_id<<std::endl;
 #endif
       };
     }
