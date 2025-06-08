@@ -52,7 +52,8 @@ endif()
 # --- Main Executable Target ---
 add_executable(code src.cpp)
 target_link_libraries(code PRIVATE app_core)
-target_compile_options(code PRIVATE -O2 -Wall -Wextra)
+target_compile_options(code PRIVATE -O2)
+#target_compile_options(code PRIVATE  -Wall -Wextra)
 message(STATUS "Configured main executable 'code'.")
 
 
