@@ -26,5 +26,5 @@ namespace norb {
   constexpr page_id_t LRU_K_INDEX = 3;
 #endif
 
-  const std::string PMEM_FILE_NAME = "test.db";
+  const std::string PMEM_FILE_NAME = "/home/rogerw/test/test.db";
 } // namespace norb

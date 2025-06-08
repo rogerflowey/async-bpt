@@ -16,7 +16,9 @@
 
 #define LOG_PREFIX_WIDTH 35
 
+#ifndef TASK_DEBUG
 #define TASK_DEBUG false
+#endif
 
 #define LOG_DEBUG if(TASK_DEBUG) std::cout << std::left << std::setw(LOG_PREFIX_WIDTH) << __func__ << " | "
 

@@ -1,8 +1,10 @@
+#define USE_SMALL_BATCH
+
 #include "test_utils.hpp"
 
 // Define USE_SMALL_BATCH if you want to test threshold-based flushes with fewer ops
 // and observe splits/merges with smaller node capacities.
-// #define USE_SMALL_BATCH
+//
 
 // Global instances for this test file
 BTreeTest btree_global_flush;

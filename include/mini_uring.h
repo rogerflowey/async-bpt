@@ -1,4 +1,4 @@
-// mini_uring.h
+// mini_uring.h (Corrected Version)
 #pragma once
 
 #include <cerrno>
@@ -18,7 +18,6 @@
 struct io_uring;
 
 // --- Syscall Wrappers ---
-// We need to wrap the raw syscalls as glibc might not have wrappers for them.
 static inline int io_uring_setup(unsigned int entries, struct io_uring_params *p) {
     return (int) syscall(__NR_io_uring_setup, entries, p);
 }
@@ -33,9 +32,6 @@ static inline int io_uring_register(int ring_fd, unsigned int opcode, void *arg,
 
 
 // --- Re-implementation of liburing structs and functions ---
-
-// We need to define our own io_uring struct to hold all the ring pointers and metadata.
-// This mimics the structure used internally by liburing.
 struct io_uring {
     struct io_uring_sq {
         unsigned *head;
@@ -56,50 +52,30 @@ struct io_uring {
 
     struct io_uring_sqe *sqes;
     int ring_fd;
-
-    // Application-side cache of the SQ tail.
     unsigned int sq_tail_cached;
 };
 
 // --- Queue Management ---
-
 static inline int io_uring_queue_init(unsigned int entries, struct io_uring *ring, unsigned int flags) {
     struct io_uring_params p;
     memset(&p, 0, sizeof(p));
     p.flags = flags;
 
     int fd = io_uring_setup(entries, &p);
-    if (fd < 0) {
-        return fd;
-    }
+    if (fd < 0) return fd;
 
-    // Memory map the submission and completion rings
     size_t sq_ring_sz = p.sq_off.array + p.sq_entries * sizeof(unsigned);
     size_t cq_ring_sz = p.cq_off.cqes + p.cq_entries * sizeof(struct io_uring_cqe);
 
     void *sq_ptr = mmap(0, sq_ring_sz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQ_RING);
-    if (sq_ptr == MAP_FAILED) {
-        close(fd);
-        return -errno;
-    }
+    if (sq_ptr == MAP_FAILED) { close(fd); return -errno; }
 
     void *cq_ptr = mmap(0, cq_ring_sz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_CQ_RING);
-    if (cq_ptr == MAP_FAILED) {
-        munmap(sq_ptr, sq_ring_sz);
-        close(fd);
-        return -errno;
-    }
+    if (cq_ptr == MAP_FAILED) { munmap(sq_ptr, sq_ring_sz); close(fd); return -errno; }
 
-    // Map the submission queue entries (SQEs)
     ring->sqes = (io_uring_sqe*)mmap(0, p.sq_entries * sizeof(struct io_uring_sqe), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQES);
-    if (ring->sqes == MAP_FAILED) {
-        munmap(cq_ptr, cq_ring_sz);
-        munmap(sq_ptr, sq_ring_sz);
-        close(fd);
-        return -errno;
-    }
+    if (ring->sqes == MAP_FAILED) { munmap(cq_ptr, cq_ring_sz); munmap(sq_ptr, sq_ring_sz); close(fd); return -errno; }
 
-    // Populate our custom io_uring struct with pointers to the mapped regions
     ring->sq.head = (unsigned*)((char*)sq_ptr + p.sq_off.head);
     ring->sq.tail = (unsigned*)((char*)sq_ptr + p.sq_off.tail);
     ring->sq.ring_mask = (unsigned*)((char*)sq_ptr + p.sq_off.ring_mask);
@@ -115,25 +91,20 @@ static inline int io_uring_queue_init(unsigned int entries, struct io_uring *rin
 
     ring->ring_fd = fd;
     ring->sq_tail_cached = *ring->sq.tail;
-
     return 0;
 }
 
 static inline void io_uring_queue_exit(struct io_uring *ring) {
-    size_t sq_ring_sz = *ring->sq.ring_entries * sizeof(unsigned) + sizeof(struct io_uring_sqe);
-    size_t cq_ring_sz = *ring->cq.ring_entries * sizeof(struct io_uring_cqe) * 2; // Approximation
-
-    // This is a simplified unmap. A more robust version would store the exact sizes from init.
+    if (ring->ring_fd == -1) return;
+    // Simplified unmap logic
     munmap(ring->sqes, *ring->sq.ring_entries * sizeof(struct io_uring_sqe));
-    munmap(ring->sq.head, sq_ring_sz); // Unmap the whole region via one of its pointers
-    munmap(ring->cq.head, cq_ring_sz); // Unmap the whole region via one of its pointers
-
+    munmap(ring->sq.head, *ring->sq.ring_entries * sizeof(unsigned) + sizeof(struct io_uring_sqe));
+    munmap(ring->cq.head, *ring->cq.ring_entries * sizeof(struct io_uring_cqe) * 2);
     close(ring->ring_fd);
     ring->ring_fd = -1;
 }
 
 // --- Submission Queue Management ---
-
 static inline struct io_uring_sqe *io_uring_get_sqe(struct io_uring *ring) {
     unsigned head = std::atomic_load_explicit((std::atomic<unsigned>*)ring->sq.head, std::memory_order_acquire);
     if (ring->sq_tail_cached - head < *ring->sq.ring_entries) {
@@ -144,25 +115,40 @@ static inline struct io_uring_sqe *io_uring_get_sqe(struct io_uring *ring) {
     return nullptr;
 }
 
+// ##################################################################
+// #                        CORRECTED FUNCTION                        #
+// ##################################################################
 static inline int io_uring_submit(struct io_uring *ring) {
-    unsigned submitted = ring->sq_tail_cached - *ring->sq.tail;
+    unsigned tail = *ring->sq.tail;
+    unsigned submitted = ring->sq_tail_cached - tail;
+
     if (submitted == 0) {
         return 0;
     }
 
-    // Make the new tail visible to the kernel
+    unsigned mask = *ring->sq.ring_mask;
+
+    // *** THE FIX IS HERE ***
+    // We must populate the indirection array (sq.array) with the indices
+    // of the SQEs we have prepared. The kernel reads this array.
+    for (unsigned i = 0; i < submitted; i++) {
+        unsigned index = (tail + i) & mask;
+        ring->sq.array[index] = index;
+    }
+
+    // Now, make the new tail visible to the kernel. This must be done
+    // with a memory barrier to ensure the sq.array writes are visible first.
     std::atomic_store_explicit((std::atomic<unsigned>*)ring->sq.tail, ring->sq_tail_cached, std::memory_order_release);
 
+    // Ask the kernel to process the 'submitted' number of new entries.
     int ret = io_uring_enter(ring->ring_fd, submitted, 0, 0, nullptr);
     return ret;
 }
 
 // --- SQE Preparation Helpers ---
-
 static inline void io_uring_prep_read(struct io_uring_sqe *sqe, int fd, void *buf, unsigned nbytes, off_t offset) {
     memset(sqe, 0, sizeof(*sqe));
     sqe->opcode = IORING_OP_READ;
-    sqe->flags = 0;
     sqe->fd = fd;
     sqe->off = offset;
     sqe->addr = (unsigned long)buf;
@@ -172,7 +158,6 @@ static inline void io_uring_prep_read(struct io_uring_sqe *sqe, int fd, void *bu
 static inline void io_uring_prep_write(struct io_uring_sqe *sqe, int fd, const void *buf, unsigned nbytes, off_t offset) {
     memset(sqe, 0, sizeof(*sqe));
     sqe->opcode = IORING_OP_WRITE;
-    sqe->flags = 0;
     sqe->fd = fd;
     sqe->off = offset;
     sqe->addr = (unsigned long)buf;
@@ -184,21 +169,18 @@ static inline void io_uring_sqe_set_data(struct io_uring_sqe *sqe, void *data) {
 }
 
 // --- Completion Queue Management ---
-
 static inline void io_uring_cq_advance(struct io_uring *ring, unsigned count) {
     if (count > 0) {
         std::atomic_store_explicit((std::atomic<unsigned>*)ring->cq.head, *ring->cq.head + count, std::memory_order_release);
     }
 }
 
-// This macro perfectly replicates the behavior of liburing's for-each loop.
 #define io_uring_for_each_cqe(ring, head, cqe) \
     for (head = *(ring)->cq.head; \
          head != std::atomic_load_explicit((std::atomic<unsigned>*)(ring)->cq.tail, std::memory_order_acquire) && (cqe = &(ring)->cq.cqes[head & *(ring)->cq.ring_mask], 1); \
          head++)
 
 // --- Registration ---
-
 static inline int io_uring_register_files(struct io_uring *ring, const int *files, unsigned nr_files) {
     return io_uring_register(ring->ring_fd, IORING_REGISTER_FILES, (void*)files, nr_files);
 }

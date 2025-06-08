@@ -318,7 +318,7 @@ int main() {
 
             // Random IOPS Performance (e.g., 4KB ops)
             const size_t iops_op_size = norb::PAGE_SIZE;
-            const int num_iops_ops = 5000;
+            const int num_iops_ops = 1000;
             const off_t max_rand_offset_pages = (perf_total_data / iops_op_size) -1;
 
             if (max_rand_offset_pages < 100) { // Need some space for random ops

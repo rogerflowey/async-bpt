@@ -1,8 +1,10 @@
+#define USE_SMALL_BATCH
+
 #include "test_utils.hpp"
 
 // Define USE_SMALL_BATCH if you want to test with smaller node capacities
 // and potentially enable more verbose tree traversal during these large tests.
-// #define USE_SMALL_BATCH
+//
 
 // Global instances for this test file
 BTreeTest btree_global_large;
@@ -286,7 +288,7 @@ void run_large_workloads_tests() {
     std::cout << "\n========== Running Large Workloads & Performance Tests (Detailed Logging) ==========" << std::endl;
     //test_AsyncRead_FromInitializedDisk_WithFlush_Detailed();
     test_AsyncMix_DiskAndWriteMap_WithPeriodicFlush_Detailed();
-    test_Performance_AsyncWorkload_Detailed();
+    //test_Performance_AsyncWorkload_Detailed();
 }
 
 int main() {

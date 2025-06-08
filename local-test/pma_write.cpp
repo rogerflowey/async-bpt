@@ -1,3 +1,6 @@
+//#define PMA_DEBUG
+//#define TASK_DEBUG true
+
 #include "persistent_memory_async.hpp" // Assuming this includes all necessary norb headers
 #include "tasks.h"                   // For wutong::Task
 #include "shared.hpp"                // For constants
