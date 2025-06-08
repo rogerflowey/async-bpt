@@ -33,53 +33,59 @@ set(LIBURING_INTERFACE_INCLUDE_PATH ${LIBURING_CONFIGURE_INCLUDEDIR_ARG})
 # The actual header file that should exist after installation
 set(LIBURING_EXPECTED_HEADER_FILE ${LIBURING_INTERFACE_INCLUDE_PATH}/liburing/liburing.h)
 
+# ... (your CMake setup) ...
 
-# --- Pre-create directories to satisfy CMake's configure-time checks ---
-message(STATUS "Pre-creating install directories for liburing:")
-message(STATUS "  Include base dir: ${LIBURING_INTERFACE_INCLUDE_PATH}") # This is .../liburing_install/include
-message(STATUS "  Lib dir: ${LIBURING_CONFIGURE_LIBDIR_ARG}")
-# liburing's 'make install' creates '.../include/liburing', so '.../include' must exist.
-file(MAKE_DIRECTORY ${LIBURING_INTERFACE_INCLUDE_PATH})
-file(MAKE_DIRECTORY ${LIBURING_CONFIGURE_LIBDIR_ARG})
-# It's also good practice to ensure the specific subdirectory for headers is also pre-created
-# if you are very specific with INTERFACE_INCLUDE_DIRECTORIES, but since liburing's make install
-# uses `install -d $(includedir)/liburing`, it will create the 'liburing' subdirectory itself
-# as long as $(includedir) exists.
+set(LIBURING_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/liburing)
+set(PREGENERATED_CONFIG_DIR ${CMAKE_CURRENT_SOURCE_DIR}/cmake/pregen) # Or wherever you put them
 
-# --- Configure, build, and install liburing using ExternalProject_Add ---
-message(STATUS "Configuring ExternalProject for liburing")
-message(STATUS "  Source dir: ${LIBURING_SOURCE_DIR}")
-message(STATUS "  Install prefix: ${LIBURING_CONFIGURE_PREFIX_ARG}")
+# Ensure target directories exist in liburing source tree
+file(MAKE_DIRECTORY ${LIBURING_SOURCE_DIR}/src/include/liburing)
 
-if(NOT EXISTS "${LIBURING_SOURCE_DIR}/configure")
-    message(FATAL_ERROR "liburing configure script not found at ${LIBURING_SOURCE_DIR}/configure. Please ensure liburing sources are correctly placed.")
-endif()
+# Copy pre-generated files
+# These commands will run at CMake configure time
+configure_file(${PREGENERATED_CONFIG_DIR}/config-host.h ${LIBURING_SOURCE_DIR}/config-host.h COPYONLY)
+configure_file(${PREGENERATED_CONFIG_DIR}/config-host.mak ${LIBURING_SOURCE_DIR}/config-host.mak COPYONLY)
+configure_file(${PREGENERATED_CONFIG_DIR}/io_uring_version.h ${LIBURING_SOURCE_DIR}/src/include/liburing/io_uring_version.h COPYONLY)
+configure_file(${PREGENERATED_CONFIG_DIR}/compat.h ${LIBURING_SOURCE_DIR}/src/include/liburing/compat.h COPYONLY)
+
+# --- ExternalProject_Add for liburing ---
+# ... (as before, but CONFIGURE_COMMAND is definitely "" or removed) ...
 
 ExternalProject_Add(${LIBURING_PROJECT_NAME}
         SOURCE_DIR          ${LIBURING_SOURCE_DIR}
         DOWNLOAD_COMMAND    ""
         UPDATE_COMMAND      ""
+        PATCH_COMMAND       ""
 
-        # Skip configure command or make it a no-op
-        CONFIGURE_COMMAND   ""
-        # Or CONFIGURE_COMMAND echo "Skipping configure; using pre-generated Makefile"
+        CONFIGURE_COMMAND   "" # Crucial: Do not run liburing's configure
 
-        # Build command would now directly use the (hopefully) existing Makefile
-        # It needs to be told where to install things, as 'configure' usually sets this in the Makefile
-        BUILD_COMMAND       $(MAKE) # This might need to be $(MAKE) -C ${LIBURING_SOURCE_DIR}/src if the main lib is there
+        # Build command: liburing's top Makefile calls make -C src
+        # It should now use the pre-generated config-host.mak
+        BUILD_COMMAND       $(MAKE) # Or $(MAKE) -C ${LIBURING_SOURCE_DIR} if top Makefile is simple
+        # Or $(MAKE) -C ${LIBURING_SOURCE_DIR}/src if that's where the main lib is built
+        # You might need to pass CC/CXX if they are not picked up correctly
+        # e.g., $(MAKE) CC=${CMAKE_C_COMPILER} CXX=${CMAKE_CXX_COMPILER}
 
-        # Install command also needs overrides
-        INSTALL_COMMAND     $(MAKE) install  # No backslash
-        prefix=${LIBURING_CONFIGURE_PREFIX_ARG}  # No backslash
-        libdir=${LIBURING_CONFIGURE_LIBDIR_ARG}  # No backslash
-        includedir=${LIBURING_CONFIGURE_INCLUDEDIR_ARG} # Last line, no backslash needed
-        # You might need -C ${LIBURING_SOURCE_DIR}/src here too
+        # Install command needs to use the paths you want for your CMake build
+        INSTALL_COMMAND     $(MAKE) install
+        prefix=${LIBURING_INSTALL_PREFIX}
+        includedir=${LIBURING_INSTALL_PREFIX}/include # Corresponds to your LIBURING_CONFIGURE_INCLUDEDIR_ARG
+        libdir=${LIBURING_INSTALL_PREFIX}/lib         # Corresponds to your LIBURING_CONFIGURE_LIBDIR_ARG
+        libdevdir=${LIBURING_INSTALL_PREFIX}/lib      # Adjust if different
+        # relativelibdir might not be needed if prefix/libdir/includedir are absolute and correct
+        # mandir and datadir can be omitted if you don't need them installed by EP
+        # mandir=${LIBURING_INSTALL_PREFIX}/man
+        # datadir=${LIBURING_INSTALL_PREFIX}/share
 
-        BUILD_BYPRODUCTS    ${LIBURING_STATIC_LIB_PATH} ${LIBURING_EXPECTED_HEADER_FILE}
+        BUILD_IN_SOURCE     1 # Make commands run from LIBURING_SOURCE_DIR
+
+        BYPRODUCTS          "${LIBURING_INSTALL_PREFIX}/lib/liburing.a"
+        "${LIBURING_INSTALL_PREFIX}/include/liburing/liburing.h"
         LOG_BUILD           1
         LOG_INSTALL         1
-        BUILD_IN_SOURCE     1 # Likely needed if Makefiles are in the source dir
 )
+
+# ... (rest of your CMakeLists.txt: add_library IMPORTED, etc.)
 
 # --- Create an IMPORTED library target for liburing ---
 message(STATUS "Creating imported target 'uring_custom_built' for ${LIBURING_STATIC_LIB_PATH}")
