@@ -1,7 +1,7 @@
-#define USE_SMALL_BATCH
-#define PMA_DEBUG
-#define TASK_DEBUG true
-#define BPT_DEBUG true
+//#define USE_SMALL_BATCH
+//#define PMA_DEBUG
+//#define TASK_DEBUG true
+//#define BPT_DEBUG true
 
 
 #include "async_bpt.h"
@@ -13,7 +13,7 @@
 #include <queue>
 
 #include "b_plus_tree.hpp"
-const auto hash_method = norb::hash::fnv1a_hash;
+const auto hash_method = norb::hash::djb2_hash;
 using norb::hash::hashed_t_;
 
 
@@ -58,10 +58,11 @@ void print_find_results(const FindResultType& results) {
 
 
 int main() {
+#ifdef CODE_TEST
     freopen("test.in","r",stdin);
     freopen("test.out","w",stdout);
     freopen("test.log","w",stderr);
-
+#endif
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);
     std::cout.tie(nullptr);

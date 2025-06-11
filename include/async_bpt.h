@@ -407,6 +407,7 @@ namespace norb {
     is_during_flush = true;
     BPT_LOG_DEBUG << "is_during_flush set to true." << std::endl;
     co_await unfinished_count;
+      assert(unfinished_count.get_value()==0);
 
     BPT_LOG_DEBUG << "All other operations finished." << std::endl;
 

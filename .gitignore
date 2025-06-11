@@ -1,6 +1,9 @@
+.idea
 .mango
 dist
-.idea
 cmake-build-debug/
+.idea/
 build/
 test_env/
+test_env/test.ans
+test_env/test.in

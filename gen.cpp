@@ -11,7 +11,7 @@ template <class T> using Arr = std::vector<T>;
 char buf[1000];
 std::mt19937 rng(std::chrono::steady_clock::now().time_since_epoch().count());
 
-constexpr size_t MAX = 400;
+constexpr size_t MAX = 100000;
 
 
 int Rand() {
@@ -22,7 +22,7 @@ int Rand(int l, int r) { return Rand() % (r - l + 1) + l; }
 
 int main() {
 	freopen("test.in","w",stdout);
-	int M = 100;
+	int M = 100000;
 	Arr<std::string> names(M);
 	for (int i = 0; i < M; ++i)
 		for (int j = 0; j < 64; ++j)
