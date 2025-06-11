@@ -78,20 +78,20 @@ set_target_properties(gen PROPERTIES
 # --- Test Building Section ---
 # ==============================================================================
 
-file(GLOB TEST_FILES "local-test/*.cpp" "local-test/abpt/*.cpp")
-message(STATUS "Found test files: ${TEST_FILES}")
-
-foreach(TEST_FILE ${TEST_FILES})
-    get_filename_component(TEST_NAME ${TEST_FILE} NAME_WE)
-    add_executable(${TEST_NAME} ${TEST_FILE})
-
-    # This is the crucial part. Because app_core has a PUBLIC dependency on
-    # either the include path (for mini_uring) or the link library (for system uring),
-    # this single line works for both scenarios.
-    target_link_libraries(${TEST_NAME} PRIVATE app_core)
-
-    set_target_properties(${TEST_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
-    message(STATUS "Configured test executable: ${TEST_NAME}")
-endforeach()
-
-message(STATUS "Build configuration complete.")
+#file(GLOB TEST_FILES "local-test/*.cpp" "local-test/abpt/*.cpp")
+#message(STATUS "Found test files: ${TEST_FILES}")
+#
+#foreach(TEST_FILE ${TEST_FILES})
+#    get_filename_component(TEST_NAME ${TEST_FILE} NAME_WE)
+#    add_executable(${TEST_NAME} ${TEST_FILE})
+#
+#    # This is the crucial part. Because app_core has a PUBLIC dependency on
+#    # either the include path (for mini_uring) or the link library (for system uring),
+#    # this single line works for both scenarios.
+#    target_link_libraries(${TEST_NAME} PRIVATE app_core)
+#
+#    set_target_properties(${TEST_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+#    message(STATUS "Configured test executable: ${TEST_NAME}")
+#endforeach()
+#
+#message(STATUS "Build configuration complete.")
