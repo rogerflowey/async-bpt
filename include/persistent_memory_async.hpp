@@ -218,6 +218,9 @@ namespace norb {
         std::cerr<<"Evict slot:"<<slot_id<<" which stores:"<<slot.buffer_page_id<<" for page:"<<page_id<<std::endl;
 #endif
       co_await evict_page(slot_id);
+      if (is_new) {
+        std::memset(buffer[slot_id], 0xFF, PAGE_SIZE);
+      }
       if (!is_new) {
 #ifdef PMA_DEBUG
         memset(buffer[slot_id], 'X', PAGE_SIZE);
@@ -235,7 +238,10 @@ namespace norb {
       // metadata
       slot.Reset();
       slot.buffer_page_id = page_id;
-      page_table.insert({page_id, slot_id});
+      auto insert_result = page_table.insert({page_id, slot_id});
+      if (!insert_result.second) {
+        insert_result.first->second = slot_id;
+      }
 
       slot.lock_count++;
 
@@ -307,6 +313,9 @@ namespace norb {
     wutong::SmartTask<void> prefetch_batch(const sjtu::vector<page_id_t>& batch_page_ids) {
       sjtu::vector<wutong::Task<ConstHandledReference<char>>> tasks;
       for (auto& page_id:batch_page_ids) {
+        if (page_id == INVALID_PAGE_ID || page_id >= current_pages_in_disk) {
+          continue;
+        }
         tasks.push_back(MutableHandle(page_id).const_ref<char>());
       }
       for(auto& task:tasks) {
@@ -473,6 +482,13 @@ namespace norb {
         assert(pmem_ptr_ != nullptr && "PMA pointer is null in ConstHandledReference constructor");
         assert(slot_id_ != static_cast<slot_id_t>(-1) && "Invalid slot_id in ConstHandledReference constructor");
         assert(page_id_ != static_cast<page_id_t>(-1) && "Invalid page_id in ConstHandledReference constructor");
+#ifndef NDEBUG
+        if (pmem_ptr_->slots[slot_id_].buffer_page_id != page_id_) {
+          std::cerr << "ConstHandledReference ctor mismatch: slot " << slot_id_
+                    << " has page " << pmem_ptr_->slots[slot_id_].buffer_page_id
+                    << " but expected " << page_id_ << std::endl;
+        }
+#endif
         assert(pmem_ptr_->slots[slot_id_].buffer_page_id == page_id_ && "PMA: Slot metadata page_id mismatch with handle's page_id at const_ref creation");
 
         pmem_ptr_->lock_slot(slot_id_);
