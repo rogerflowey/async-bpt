@@ -18,6 +18,7 @@
 #include <iostream>
 #include <map>
 #include <smart_task.h>
+#include <vector>
 
 //#define PMA_DEBUG
 
@@ -310,13 +311,16 @@ namespace norb {
       std::filesystem::resize_file(PMEM_FILE_NAME, max_page_size_ * PAGE_SIZE);
     }
 
-    wutong::SmartTask<void> prefetch_batch(const sjtu::vector<page_id_t>& batch_page_ids) {
+    wutong::SmartTask<void> prefetch_batch(sjtu::vector<page_id_t> batch_page_ids) {
+      std::vector<MutableHandle> handles;
+      handles.reserve(batch_page_ids.size());
       sjtu::vector<wutong::Task<ConstHandledReference<char>>> tasks;
-      for (auto& page_id:batch_page_ids) {
+      for (page_id_t page_id : batch_page_ids) {
         if (page_id == INVALID_PAGE_ID || page_id >= current_pages_in_disk) {
           continue;
         }
-        tasks.push_back(MutableHandle(page_id).const_ref<char>());
+        handles.emplace_back(page_id);
+        tasks.push_back(handles.back().const_ref<char>());
       }
       for(auto& task:tasks) {
         co_await task;

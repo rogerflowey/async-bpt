@@ -404,7 +404,11 @@ namespace norb {
     wutong::Task<void> flush() {
     BPT_LOG_DEBUG << "Entering flush. write_map_ size: " << write_map_.size() << ", unfinished_count: " << unfinished_count.get_value() << std::endl;
     wutong::SmartTask<void> prefetch_task{};
+#ifdef BPT_DISABLE_PREFETCH
     constexpr bool ENABLE_PREFETCH = false;
+#else
+    constexpr bool ENABLE_PREFETCH = true;
+#endif
     is_during_flush = true;
     BPT_LOG_DEBUG << "is_during_flush set to true." << std::endl;
     co_await unfinished_count;
@@ -614,8 +618,14 @@ namespace norb {
 
 
         if (page_to_load != -1 && page_to_load != INVALID_PAGE_ID) {
-           BPT_LOG_DEBUG << "Adding page " << page_to_load << " to prefetch list." << std::endl;
-           prefetch_ids.push_back(page_to_load);
+           if (page_to_load < PersistentMemoryAsync::get_page_count()) {
+             BPT_LOG_DEBUG << "Adding page " << page_to_load << " to prefetch list." << std::endl;
+             prefetch_ids.push_back(page_to_load);
+           } else {
+             BPT_LOG_WARN << "Prefetch candidate page " << page_to_load
+                          << " exceeds current page count " << PersistentMemoryAsync::get_page_count()
+                          << ". Skipping." << std::endl;
+           }
         }
         map_it = write_map_.lower_bound(next_separator_key);
         BPT_LOG_DEBUG << "Advanced map_it. New key: "
