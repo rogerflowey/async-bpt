@@ -627,7 +627,12 @@ namespace norb {
                           << ". Skipping." << std::endl;
            }
         }
+
+        const storage_pair_t current_key = map_it->first;
         map_it = write_map_.lower_bound(next_separator_key);
+        if (map_it != write_map_.end() && !(current_key < map_it->first)) {
+            ++map_it;
+        }
         BPT_LOG_DEBUG << "Advanced map_it. New key: "
                   << (map_it != write_map_.end() ? "(" + std::to_string(map_it->first.first) + "," + std::to_string(map_it->first.second) + ")" : "end")
                   << ". Prefetch IDs size: " << prefetch_ids.size() << std::endl;
