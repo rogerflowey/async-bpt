@@ -404,6 +404,11 @@ namespace norb {
     wutong::Task<void> flush() {
     BPT_LOG_DEBUG << "Entering flush. write_map_ size: " << write_map_.size() << ", unfinished_count: " << unfinished_count.get_value() << std::endl;
     wutong::SmartTask<void> prefetch_task{};
+#ifdef BPT_DISABLE_PREFETCH
+    constexpr bool ENABLE_PREFETCH = false;
+#else
+    constexpr bool ENABLE_PREFETCH = true;
+#endif
     is_during_flush = true;
     BPT_LOG_DEBUG << "is_during_flush set to true." << std::endl;
     co_await unfinished_count;
@@ -473,7 +478,7 @@ namespace norb {
         bool should_trigger_prefetch = (ops_since_prefetch >= PREFETCH_OPS_LIMIT) ||
                                        (distinct_leaves_prefetch >= PREFETCH_LEAF_LIMIT);
 
-        if (should_trigger_prefetch) {
+        if (ENABLE_PREFETCH && should_trigger_prefetch) {
           BPT_LOG_DEBUG << "Prefetch condition met. ops_since_prefetch: " << ops_since_prefetch
                     << ", distinct_leaves_prefetch: " << distinct_leaves_prefetch << std::endl;
           if (prefetch_task.is_valid()) {
@@ -542,7 +547,7 @@ namespace norb {
         ops_since_prefetch++;
     }
     BPT_LOG_DEBUG << "Finished processing all write_map_ operations." << std::endl;
-    if (prefetch_task.is_valid()) {
+    if (ENABLE_PREFETCH && prefetch_task.is_valid()) {
         BPT_LOG_DEBUG << "Awaiting final prefetch task." << std::endl;
         co_await prefetch_task;
         BPT_LOG_DEBUG << "Final prefetch task completed." << std::endl;
@@ -613,10 +618,21 @@ namespace norb {
 
 
         if (page_to_load != -1 && page_to_load != INVALID_PAGE_ID) {
-           BPT_LOG_DEBUG << "Adding page " << page_to_load << " to prefetch list." << std::endl;
-           prefetch_ids.push_back(page_to_load);
+           if (page_to_load < PersistentMemoryAsync::get_page_count()) {
+             BPT_LOG_DEBUG << "Adding page " << page_to_load << " to prefetch list." << std::endl;
+             prefetch_ids.push_back(page_to_load);
+           } else {
+             BPT_LOG_WARN << "Prefetch candidate page " << page_to_load
+                          << " exceeds current page count " << PersistentMemoryAsync::get_page_count()
+                          << ". Skipping." << std::endl;
+           }
         }
+
+        const storage_pair_t current_key = map_it->first;
         map_it = write_map_.lower_bound(next_separator_key);
+        if (map_it != write_map_.end() && !(current_key < map_it->first)) {
+            ++map_it;
+        }
         BPT_LOG_DEBUG << "Advanced map_it. New key: "
                   << (map_it != write_map_.end() ? "(" + std::to_string(map_it->first.first) + "," + std::to_string(map_it->first.second) + ")" : "end")
                   << ". Prefetch IDs size: " << prefetch_ids.size() << std::endl;
@@ -709,6 +725,13 @@ namespace norb {
                 << ", size " << final_index_node_ref->size << "), child_idx " << child_idx_in_final_index << std::endl;
       BPT_LOG_DEBUG << "Final index " << format_index_contents(*final_index_node_ref, final_index_node_ref.get_handle().page_id) << std::endl;
 
+
+      if(child_idx_in_final_index > final_index_node_ref->size) {
+        BPT_LOG_WARN << "Child index " << child_idx_in_final_index << " exceeds node size " << final_index_node_ref->size
+                     << " for index node " << final_index_node_ref.get_handle().page_id
+                     << ". Skipping prefetch for this path." << std::endl;
+        return {INVALID_PAGE_ID, upper_bound_for_next_key};
+      }
 
       if(child_idx_in_final_index < final_index_node_ref->size) {
         upper_bound_for_next_key = final_index_node_ref->data[child_idx_in_final_index];
