@@ -16,6 +16,7 @@
 #include <shared.hpp>
 #include <iomanip>    // For std::setw
 #include <sstream>    // For std::stringstream in logging
+#include <unordered_set>
 
 //#define TEMPLATE_CHECK
 
@@ -58,6 +59,7 @@ namespace norb {
     enum node_type { index, leaf };
 
     sjtu::map<storage_pair_t, OpType> write_map_;
+    std::unordered_set<idx_t> known_absent_keys_;
     bool is_during_flush = false;
     wutong::CriteriaVariable<size_t> unfinished_count{0,[](const size_t& count){ return count == 0; }};
 
@@ -288,11 +290,15 @@ namespace norb {
       sjtu::vector<storage_pair_t> result_vec;
 
       sjtu::vector<Pair<storage_pair_t, OpType>> map_ops_in_range;
+      bool saw_insert_op_for_key = false;
       auto map_it_start = write_map_.lower_bound(range_start);
       auto map_it_end = write_map_.lower_bound(range_end);
       for (auto it_map = map_it_start; it_map != map_it_end; ++it_map) {
         map_ops_in_range.push_back(
             norb::make_pair(it_map->first, it_map->second));
+        if (it_map->second == OpType::INSERT) {
+          saw_insert_op_for_key = true;
+        }
       }
       BPT_LOG_DEBUG << "Found " << map_ops_in_range.size() << " ops in write_map_ for the range." << std::endl;
 
@@ -348,6 +354,17 @@ namespace norb {
         result_vec.push_back(bpt_pairs_in_range[bpt_idx]);
         bpt_idx++;
       }
+      const bool is_full_key_range = (range_start.first == range_end.first) &&
+                                     (range_start.second == val_min) &&
+                                     (range_end.second == val_max);
+      if (is_full_key_range) {
+        if (result_vec.empty() && !saw_insert_op_for_key) {
+          known_absent_keys_.insert(range_start.first);
+        } else {
+          known_absent_keys_.erase(range_start.first);
+        }
+      }
+
       (**unfinished_count)--;
       BPT_LOG_DEBUG << "unfinished_count decremented to " << unfinished_count.get_value() << ". Merge complete. Result size: " << result_vec.size() << std::endl;
       co_return result_vec;
@@ -368,6 +385,7 @@ namespace norb {
       BPT_LOG_DEBUG << "Entering. Key: " << key << ", Val: " << val << ". write_map_ size: " << write_map_.size() << std::endl;
 
       storage_pair_t target_pair = norb::make_pair(key, val);
+      known_absent_keys_.erase(key);
       write_map_[target_pair] = OpType::INSERT;
       BPT_LOG_DEBUG << "Inserted (" << key << "," << val << ") into write_map_. New size: " << write_map_.size() << std::endl;
       if(write_map_.size()>=FLUSH_THRESHOLD) {
@@ -380,7 +398,24 @@ namespace norb {
     wutong::Task<void> remove_async(const idx_t &key, const val_t &val) {
       BPT_LOG_DEBUG << "Entering. Key: " << key << ", Val: " << val << ". write_map_ size: " << write_map_.size() << std::endl;
       storage_pair_t target_pair = norb::make_pair(key, val);
+      auto existing_it = write_map_.find(target_pair);
+      if (existing_it != write_map_.end()) {
+        if (existing_it->second == OpType::INSERT) {
+          BPT_LOG_DEBUG << "Pending INSERT for (" << key << "," << val << ") found. Cancelling it instead of recording DELETE." << std::endl;
+          write_map_.erase(existing_it);
+        } else {
+          BPT_LOG_DEBUG << "DELETE for (" << key << "," << val << ") already pending. No additional action taken." << std::endl;
+        }
+        co_return;
+      }
+
+      if (known_absent_keys_.find(key) != known_absent_keys_.end()) {
+        BPT_LOG_DEBUG << "Key " << key << " known to be absent. Skipping DELETE bookkeeping." << std::endl;
+        co_return;
+      }
+
       write_map_[target_pair] = OpType::DELETE;
+      known_absent_keys_.erase(key);
       BPT_LOG_DEBUG << "Marked (" << key << "," << val << ") as DELETE in write_map_. New size: " << write_map_.size() << std::endl;
       if(write_map_.size()>=FLUSH_THRESHOLD) {
         BPT_LOG_DEBUG << "Flush threshold (" << FLUSH_THRESHOLD << ") reached. Triggering flush." << std::endl;
@@ -404,6 +439,11 @@ namespace norb {
     wutong::Task<void> flush() {
     BPT_LOG_DEBUG << "Entering flush. write_map_ size: " << write_map_.size() << ", unfinished_count: " << unfinished_count.get_value() << std::endl;
     wutong::SmartTask<void> prefetch_task{};
+#ifdef BPT_DISABLE_PREFETCH
+    constexpr bool ENABLE_PREFETCH = false;
+#else
+    constexpr bool ENABLE_PREFETCH = true;
+#endif
     is_during_flush = true;
     BPT_LOG_DEBUG << "is_during_flush set to true." << std::endl;
     co_await unfinished_count;
@@ -473,7 +513,7 @@ namespace norb {
         bool should_trigger_prefetch = (ops_since_prefetch >= PREFETCH_OPS_LIMIT) ||
                                        (distinct_leaves_prefetch >= PREFETCH_LEAF_LIMIT);
 
-        if (should_trigger_prefetch) {
+        if (ENABLE_PREFETCH && should_trigger_prefetch) {
           BPT_LOG_DEBUG << "Prefetch condition met. ops_since_prefetch: " << ops_since_prefetch
                     << ", distinct_leaves_prefetch: " << distinct_leaves_prefetch << std::endl;
           if (prefetch_task.is_valid()) {
@@ -542,7 +582,7 @@ namespace norb {
         ops_since_prefetch++;
     }
     BPT_LOG_DEBUG << "Finished processing all write_map_ operations." << std::endl;
-    if (prefetch_task.is_valid()) {
+    if (ENABLE_PREFETCH && prefetch_task.is_valid()) {
         BPT_LOG_DEBUG << "Awaiting final prefetch task." << std::endl;
         co_await prefetch_task;
         BPT_LOG_DEBUG << "Final prefetch task completed." << std::endl;
@@ -613,10 +653,21 @@ namespace norb {
 
 
         if (page_to_load != -1 && page_to_load != INVALID_PAGE_ID) {
-           BPT_LOG_DEBUG << "Adding page " << page_to_load << " to prefetch list." << std::endl;
-           prefetch_ids.push_back(page_to_load);
+           if (page_to_load < PersistentMemoryAsync::get_page_count()) {
+             BPT_LOG_DEBUG << "Adding page " << page_to_load << " to prefetch list." << std::endl;
+             prefetch_ids.push_back(page_to_load);
+           } else {
+             BPT_LOG_WARN << "Prefetch candidate page " << page_to_load
+                          << " exceeds current page count " << PersistentMemoryAsync::get_page_count()
+                          << ". Skipping." << std::endl;
+           }
         }
+
+        const storage_pair_t current_key = map_it->first;
         map_it = write_map_.lower_bound(next_separator_key);
+        if (map_it != write_map_.end() && !(current_key < map_it->first)) {
+            ++map_it;
+        }
         BPT_LOG_DEBUG << "Advanced map_it. New key: "
                   << (map_it != write_map_.end() ? "(" + std::to_string(map_it->first.first) + "," + std::to_string(map_it->first.second) + ")" : "end")
                   << ". Prefetch IDs size: " << prefetch_ids.size() << std::endl;
@@ -709,6 +760,13 @@ namespace norb {
                 << ", size " << final_index_node_ref->size << "), child_idx " << child_idx_in_final_index << std::endl;
       BPT_LOG_DEBUG << "Final index " << format_index_contents(*final_index_node_ref, final_index_node_ref.get_handle().page_id) << std::endl;
 
+
+      if(child_idx_in_final_index > final_index_node_ref->size) {
+        BPT_LOG_WARN << "Child index " << child_idx_in_final_index << " exceeds node size " << final_index_node_ref->size
+                     << " for index node " << final_index_node_ref.get_handle().page_id
+                     << ". Skipping prefetch for this path." << std::endl;
+        return {INVALID_PAGE_ID, upper_bound_for_next_key};
+      }
 
       if(child_idx_in_final_index < final_index_node_ref->size) {
         upper_bound_for_next_key = final_index_node_ref->data[child_idx_in_final_index];
@@ -1513,6 +1571,7 @@ namespace norb {
         const sjtu::vector<storage_pair_t> &sorted_data) {
       BPT_LOG_DEBUG << "Entering. Initializing with " << sorted_data.size() << " elements." << std::endl;
       write_map_.clear();
+      known_absent_keys_.clear();
       BPT_LOG_DEBUG << "write_map_ cleared." << std::endl;
 
       root_handle_.val.set_nullptr();
